@@ -27,6 +27,7 @@ type ServeMux struct {
 	m   map[string]muxEntry
 	es  []muxEntry // slice of entries sorted from longest to shortest.
 	mws []MiddlewareFunc
+	wf  *Workflow
 }
 
 type muxEntry struct {
@@ -49,6 +50,21 @@ func NewServeMux() *ServeMux {
 func (mux *ServeMux) ProcessTask(ctx context.Context, task *Task) error {
 	h, _ := mux.Handler(task)
 	return h.ProcessTask(ctx, task)
+}
+
+func (mux *ServeMux) UseWorkflow(wf *Workflow) {
+	wf.RegisterRoutes(mux)
+	wf.InitiateAllFlows()
+
+	flows := wf.GetAllFlows()
+	for _, flow := range flows {
+		mux.Handle(flow.GetName(), HandlerFunc(flow.ProcessSequence))
+	}
+	// for job, hdl := range mux.GetAllRoutes() {
+	// 	flow.Job(job, hdl.ProcessTask)
+	// }
+
+	// mux.Handle(flow.GetName(), HandlerFunc(flow.ProcessSequence))
 }
 
 // Handler returns the handler to use for the given task.
@@ -152,5 +168,16 @@ func NotFound(ctx context.Context, task *Task) error {
 	return fmt.Errorf("handler not found for task %q", task.Type())
 }
 
-// NotFoundHandler returns a simple task handler that returns a ``not found`` error.
+// NotFoundHandler returns a simple task handler that returns a “not found“ error.
 func NotFoundHandler() Handler { return HandlerFunc(NotFound) }
+
+func (mux *ServeMux) GetAllRoutes() map[string]Handler {
+	mux.mu.RLock()
+	defer mux.mu.RUnlock()
+
+	routes := make(map[string]Handler)
+	for _, entry := range mux.m {
+		routes[entry.pattern] = entry.h
+	}
+	return routes
+}

@@ -1,18 +1,19 @@
-module github.com/hibiken/asynq
+module github.com/suryatresna/asynq
 
-go 1.22
+go 1.23.2
 
 require (
-	github.com/google/go-cmp v0.6.0
+	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/heimdalr/dag v1.5.0
-	github.com/redis/go-redis/v9 v9.7.0
+	github.com/hibiken/asynq v0.25.1
+	github.com/redis/go-redis/v9 v9.7.3
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/spf13/cast v1.7.0
+	github.com/spf13/cast v1.7.1
 	go.uber.org/goleak v1.3.0
-	golang.org/x/sys v0.27.0
-	golang.org/x/time v0.8.0
-	google.golang.org/protobuf v1.35.2
+	golang.org/x/sys v0.32.0
+	golang.org/x/time v0.11.0
+	google.golang.org/protobuf v1.36.6
 )
 
 require (

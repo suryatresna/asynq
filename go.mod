@@ -6,7 +6,6 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/heimdalr/dag v1.5.0
-	github.com/hibiken/asynq v0.25.1
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/cast v1.7.1

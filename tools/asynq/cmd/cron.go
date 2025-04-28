@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/MakeNowJust/heredoc/v2"
-	"github.com/hibiken/asynq"
 	"github.com/spf13/cobra"
+	"github.com/suryatresna/asynq"
 )
 
 func init() {

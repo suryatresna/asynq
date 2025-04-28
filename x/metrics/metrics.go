@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/hibiken/asynq"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/suryatresna/asynq"
 )
 
 // Namespace used in fully-qualified metrics names.

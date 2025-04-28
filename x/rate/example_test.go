@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hibiken/asynq"
+	"github.com/suryatresna/asynq"
 	"github.com/suryatresna/asynq/x/rate"
 )
 

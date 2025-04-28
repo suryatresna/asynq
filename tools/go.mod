@@ -7,7 +7,7 @@ require (
 	github.com/fatih/color v1.18.0
 	github.com/gdamore/tcell/v2 v2.5.1
 	github.com/google/go-cmp v0.6.0
-	github.com/hibiken/asynq v0.25.0
+	github.com/suryatresna/asynq v0.25.0
 	github.com/suryatresna/asynq/x v0.0.0-20220131170841-349f4c50fb1d
 	github.com/mattn/go-runewidth v0.0.16
 	github.com/mitchellh/go-homedir v1.1.0

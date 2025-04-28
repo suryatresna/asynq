@@ -2,8 +2,8 @@
 
 # Simple, reliable & efficient distributed task queue in Go
 
-[![GoDoc](https://godoc.org/github.com/hibiken/asynq?status.svg)](https://godoc.org/github.com/hibiken/asynq)
-[![Go Report Card](https://goreportcard.com/badge/github.com/hibiken/asynq)](https://goreportcard.com/report/github.com/hibiken/asynq)
+[![GoDoc](https://godoc.org/github.com/suryatresna/asynq?status.svg)](https://godoc.org/github.com/suryatresna/asynq)
+[![Go Report Card](https://goreportcard.com/badge/github.com/suryatresna/asynq)](https://goreportcard.com/report/github.com/suryatresna/asynq)
 ![Build Status](https://github.com/suryatresna/asynq/workflows/build/badge.svg)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Gitter chat](https://badges.gitter.im/go-asynq/gitter.svg)](https://gitter.im/go-asynq/community)
@@ -61,7 +61,7 @@ Make sure you have Go installed ([download](https://golang.org/dl/)). The **last
 Initialize your project by creating a folder and then running `go mod init github.com/your/repo` ([learn more](https://blog.golang.org/using-go-modules)) inside the folder. Then install Asynq library with the [`go get`](https://golang.org/cmd/go/#hdr-Add_dependencies_to_current_module_and_install_them) command:
 
 ```sh
-go get -u github.com/hibiken/asynq
+go get -u github.com/suryatresna/asynq
 ```
 
 Make sure you're running a Redis server locally or from a [Docker](https://hub.docker.com/_/redis) container. Version `4.0` or higher is required.
@@ -77,7 +77,7 @@ import (
     "fmt"
     "log"
     "time"
-    "github.com/hibiken/asynq"
+    "github.com/suryatresna/asynq"
 )
 
 // A list of task types.
@@ -155,7 +155,7 @@ func NewImageProcessor() *ImageProcessor {
 }
 ```
 
-In your application code, import the above package and use [`Client`](https://pkg.go.dev/github.com/hibiken/asynq?tab=doc#Client) to put tasks on queues.
+In your application code, import the above package and use [`Client`](https://pkg.go.dev/github.com/suryatresna/asynq?tab=doc#Client) to put tasks on queues.
 
 ```go
 package main
@@ -164,7 +164,7 @@ import (
     "log"
     "time"
 
-    "github.com/hibiken/asynq"
+    "github.com/suryatresna/asynq"
     "your/app/package/tasks"
 )
 
@@ -219,9 +219,9 @@ func main() {
 }
 ```
 
-Next, start a worker server to process these tasks in the background. To start the background workers, use [`Server`](https://pkg.go.dev/github.com/hibiken/asynq?tab=doc#Server) and provide your [`Handler`](https://pkg.go.dev/github.com/hibiken/asynq?tab=doc#Handler) to process the tasks.
+Next, start a worker server to process these tasks in the background. To start the background workers, use [`Server`](https://pkg.go.dev/github.com/suryatresna/asynq?tab=doc#Server) and provide your [`Handler`](https://pkg.go.dev/github.com/suryatresna/asynq?tab=doc#Handler) to process the tasks.
 
-You can optionally use [`ServeMux`](https://pkg.go.dev/github.com/hibiken/asynq?tab=doc#ServeMux) to create a handler, just as you would with [`net/http`](https://golang.org/pkg/net/http/) Handler.
+You can optionally use [`ServeMux`](https://pkg.go.dev/github.com/suryatresna/asynq?tab=doc#ServeMux) to create a handler, just as you would with [`net/http`](https://golang.org/pkg/net/http/) Handler.
 
 ```go
 package main
@@ -229,7 +229,7 @@ package main
 import (
     "log"
 
-    "github.com/hibiken/asynq"
+    "github.com/suryatresna/asynq"
     "your/app/package/tasks"
 )
 
@@ -265,11 +265,11 @@ func main() {
 
 For a more detailed walk-through of the library, see our [Getting Started](https://github.com/suryatresna/asynq/wiki/Getting-Started) guide.
 
-To learn more about `asynq` features and APIs, see the package [godoc](https://godoc.org/github.com/hibiken/asynq).
+To learn more about `asynq` features and APIs, see the package [godoc](https://godoc.org/github.com/suryatresna/asynq).
 
 ## Web UI
 
-[Asynqmon](https://github.com/hibiken/asynqmon) is a web based tool for monitoring and administrating Asynq queues and tasks.
+[Asynqmon](https://github.com/suryatresna/asynqmon) is a web based tool for monitoring and administrating Asynq queues and tasks.
 
 Here's a few screenshots of the Web UI:
 
@@ -288,7 +288,7 @@ Here's a few screenshots of the Web UI:
 
 ![Web UI Settings and adaptive dark mode](https://user-images.githubusercontent.com/11155743/114697149-3517c380-9d26-11eb-9f7a-ae2dd00aad5b.png)
 
-For details on how to use the tool, refer to the tool's [README](https://github.com/hibiken/asynqmon#readme).
+For details on how to use the tool, refer to the tool's [README](https://github.com/suryatresna/asynqmon#readme).
 
 ## Command Line Tool
 

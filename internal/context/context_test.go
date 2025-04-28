@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq/internal/base"
+	"github.com/suryatresna/asynq/internal/base"
 )
 
 func TestCreateContextWithFutureDeadline(t *testing.T) {

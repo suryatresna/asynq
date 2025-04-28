@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/MakeNowJust/heredoc/v2"
-	"github.com/hibiken/asynq/tools/asynq/cmd/dash"
 	"github.com/spf13/cobra"
+	"github.com/suryatresna/asynq/tools/asynq/cmd/dash"
 )
 
 var (

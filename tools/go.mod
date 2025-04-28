@@ -1,4 +1,4 @@
-module github.com/hibiken/asynq/tools
+module github.com/suryatresna/asynq/tools
 
 go 1.22
 
@@ -8,7 +8,7 @@ require (
 	github.com/gdamore/tcell/v2 v2.5.1
 	github.com/google/go-cmp v0.6.0
 	github.com/hibiken/asynq v0.25.0
-	github.com/hibiken/asynq/x v0.0.0-20220131170841-349f4c50fb1d
+	github.com/suryatresna/asynq/x v0.0.0-20220131170841-349f4c50fb1d
 	github.com/mattn/go-runewidth v0.0.16
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/prometheus/client_golang v1.11.1

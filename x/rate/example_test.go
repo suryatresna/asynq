@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
-	"github.com/hibiken/asynq/x/rate"
+	"github.com/suryatresna/asynq/x/rate"
 )
 
 type RateLimitError struct {

@@ -18,8 +18,8 @@ import (
 
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/fatih/color"
-	"github.com/hibiken/asynq/internal/rdb"
 	"github.com/spf13/cobra"
+	"github.com/suryatresna/asynq/internal/rdb"
 )
 
 // statsCmd represents the stats command

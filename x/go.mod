@@ -1,4 +1,4 @@
-module github.com/hibiken/asynq/x
+module github.com/suryatresna/asynq/x
 
 go 1.22
 

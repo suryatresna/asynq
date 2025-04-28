@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/heimdalr/dag"
 )
 
 type Workflow struct {
+	mu sync.RWMutex
 	// flow define the flow
 	flows map[string]FlowInterface
 
@@ -84,6 +86,8 @@ func (a *Workflow) RegisterRoutes(mux *ServeMux) {
 }
 
 func (a *Workflow) InitiateAllFlows() {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	flows := make(map[string]FlowInterface)
 	for _, opt := range a.opts {
 		optFlows := opt.GetFlows()
@@ -125,6 +129,7 @@ func (a *Workflow) NewFlow(flowname string) FlowInterface {
 }
 
 type Flow struct {
+	mu          sync.RWMutex
 	name        string
 	dag         *dag.DAG
 	mapHandler  map[string]func(ctx context.Context, t *Task) error
@@ -135,6 +140,9 @@ type Flow struct {
 }
 
 func (f *Flow) Node(name string) (string, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
 	res, err := f.dag.AddVertex(name)
 	if err != nil {
 		return "", err
@@ -144,6 +152,9 @@ func (f *Flow) Node(name string) (string, error) {
 }
 
 func (f *Flow) Edge(name string, from, to string) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
 	if f.firstVertex == "" {
 		f.firstVertex = from
 	}
@@ -170,6 +181,9 @@ func (f *Flow) GetName() string {
 }
 
 func (f *Flow) ProcessSequence(ctx context.Context, t *Task) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
 	if f.dag == nil {
 		return fmt.Errorf("dag is not initialized")
 	}

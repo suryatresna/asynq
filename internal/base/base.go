@@ -23,7 +23,7 @@ import (
 )
 
 // Version of asynq library and CLI.
-const Version = "0.25.1"
+const Version = "0.26.0"
 
 // DefaultQueueName is the queue name used if none are specified by user.
 const DefaultQueueName = "default"
@@ -240,6 +240,9 @@ type TaskMessage struct {
 	// Payload holds data needed to process the task.
 	Payload []byte
 
+	// Headers holds additional metadata for the task.
+	Headers map[string]string
+
 	// ID is a unique identifier for each task.
 	ID string
 
@@ -304,6 +307,7 @@ func EncodeMessage(msg *TaskMessage) ([]byte, error) {
 	return proto.Marshal(&pb.TaskMessage{
 		Type:         msg.Type,
 		Payload:      msg.Payload,
+		Headers:      msg.Headers,
 		Id:           msg.ID,
 		Queue:        msg.Queue,
 		Retry:        int32(msg.Retry),
@@ -328,6 +332,7 @@ func DecodeMessage(data []byte) (*TaskMessage, error) {
 	return &TaskMessage{
 		Type:         pbmsg.GetType(),
 		Payload:      pbmsg.GetPayload(),
+		Headers:      pbmsg.GetHeaders(),
 		ID:           pbmsg.GetId(),
 		Queue:        pbmsg.GetQueue(),
 		Retry:        int(pbmsg.GetRetry()),
@@ -679,6 +684,14 @@ func (l *Lease) IsValid() bool {
 	return l.expireAt.After(now) || l.expireAt.Equal(now)
 }
 
+// BatchEnqueueItem pairs a task message with optional scheduling metadata for
+// batch enqueue operations. If ProcessAt is zero, the task is enqueued for
+// immediate processing; otherwise it is added to the scheduled set.
+type BatchEnqueueItem struct {
+	Msg       *TaskMessage
+	ProcessAt time.Time // zero value → immediate
+}
+
 // Broker is a message broker that supports operations to manage task queues.
 //
 // See rdb.RDB as a reference implementation.
@@ -687,6 +700,12 @@ type Broker interface {
 	Close() error
 	Enqueue(ctx context.Context, msg *TaskMessage) error
 	EnqueueUnique(ctx context.Context, msg *TaskMessage, ttl time.Duration) error
+	// BatchEnqueue enqueues multiple tasks in a single round-trip. It returns the
+	// count of newly enqueued tasks; duplicate IDs are silently skipped. The error
+	// is non-nil only on infrastructure failure (e.g. lost connection), in which
+	// case the count is meaningless. Individual task scripts are atomic but the
+	// batch as a whole is not transactional — partial success is possible.
+	BatchEnqueue(ctx context.Context, items []BatchEnqueueItem) (int, error)
 	Dequeue(qnames ...string) (*TaskMessage, time.Time, error)
 	Done(ctx context.Context, msg *TaskMessage) error
 	MarkAsComplete(ctx context.Context, msg *TaskMessage) error

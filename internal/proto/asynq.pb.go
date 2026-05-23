@@ -28,13 +28,15 @@ const (
 
 // TaskMessage is the internal representation of a task with additional
 // metadata fields.
-// Next ID: 15
+// Next ID: 16
 type TaskMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Type indicates the kind of the task to be performed.
 	Type string `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
 	// Payload holds data needed to process the task.
 	Payload []byte `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
+	// Headers holds additional metadata for the task.
+	Headers map[string]string `protobuf:"bytes,15,rep,name=headers,proto3" json:"headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Unique identifier for the task.
 	Id string `protobuf:"bytes,3,opt,name=id,proto3" json:"id,omitempty"`
 	// Name of the queue to which this task belongs.
@@ -114,6 +116,13 @@ func (x *TaskMessage) GetType() string {
 func (x *TaskMessage) GetPayload() []byte {
 	if x != nil {
 		return x.Payload
+	}
+	return nil
+}
+
+func (x *TaskMessage) GetHeaders() map[string]string {
+	if x != nil {
+		return x.Headers
 	}
 	return nil
 }
@@ -604,10 +613,11 @@ var File_asynq_proto protoreflect.FileDescriptor
 
 const file_asynq_proto_rawDesc = "" +
 	"\n" +
-	"\vasynq.proto\x12\x05asynq\x1a\x1fgoogle/protobuf/timestamp.proto\"\x87\x03\n" +
+	"\vasynq.proto\x12\x05asynq\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfe\x03\n" +
 	"\vTaskMessage\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\fR\apayload\x12\x0e\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\x129\n" +
+	"\aheaders\x18\x0f \x03(\v2\x1f.asynq.TaskMessage.HeadersEntryR\aheaders\x12\x0e\n" +
 	"\x02id\x18\x03 \x01(\tR\x02id\x12\x14\n" +
 	"\x05queue\x18\x04 \x01(\tR\x05queue\x12\x14\n" +
 	"\x05retry\x18\x05 \x01(\x05R\x05retry\x12\x18\n" +
@@ -621,7 +631,10 @@ const file_asynq_proto_rawDesc = "" +
 	" \x01(\tR\tuniqueKey\x12\x1b\n" +
 	"\tgroup_key\x18\x0e \x01(\tR\bgroupKey\x12\x1c\n" +
 	"\tretention\x18\f \x01(\x03R\tretention\x12!\n" +
-	"\fcompleted_at\x18\r \x01(\x03R\vcompletedAt\"\x8f\x03\n" +
+	"\fcompleted_at\x18\r \x01(\x03R\vcompletedAt\x1a:\n" +
+	"\fHeadersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8f\x03\n" +
 	"\n" +
 	"ServerInfo\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x10\n" +
@@ -673,29 +686,31 @@ func file_asynq_proto_rawDescGZIP() []byte {
 	return file_asynq_proto_rawDescData
 }
 
-var file_asynq_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_asynq_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_asynq_proto_goTypes = []any{
 	(*TaskMessage)(nil),           // 0: asynq.TaskMessage
 	(*ServerInfo)(nil),            // 1: asynq.ServerInfo
 	(*WorkerInfo)(nil),            // 2: asynq.WorkerInfo
 	(*SchedulerEntry)(nil),        // 3: asynq.SchedulerEntry
 	(*SchedulerEnqueueEvent)(nil), // 4: asynq.SchedulerEnqueueEvent
-	nil,                           // 5: asynq.ServerInfo.QueuesEntry
-	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
+	nil,                           // 5: asynq.TaskMessage.HeadersEntry
+	nil,                           // 6: asynq.ServerInfo.QueuesEntry
+	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
 }
 var file_asynq_proto_depIdxs = []int32{
-	5, // 0: asynq.ServerInfo.queues:type_name -> asynq.ServerInfo.QueuesEntry
-	6, // 1: asynq.ServerInfo.start_time:type_name -> google.protobuf.Timestamp
-	6, // 2: asynq.WorkerInfo.start_time:type_name -> google.protobuf.Timestamp
-	6, // 3: asynq.WorkerInfo.deadline:type_name -> google.protobuf.Timestamp
-	6, // 4: asynq.SchedulerEntry.next_enqueue_time:type_name -> google.protobuf.Timestamp
-	6, // 5: asynq.SchedulerEntry.prev_enqueue_time:type_name -> google.protobuf.Timestamp
-	6, // 6: asynq.SchedulerEnqueueEvent.enqueue_time:type_name -> google.protobuf.Timestamp
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	5, // 0: asynq.TaskMessage.headers:type_name -> asynq.TaskMessage.HeadersEntry
+	6, // 1: asynq.ServerInfo.queues:type_name -> asynq.ServerInfo.QueuesEntry
+	7, // 2: asynq.ServerInfo.start_time:type_name -> google.protobuf.Timestamp
+	7, // 3: asynq.WorkerInfo.start_time:type_name -> google.protobuf.Timestamp
+	7, // 4: asynq.WorkerInfo.deadline:type_name -> google.protobuf.Timestamp
+	7, // 5: asynq.SchedulerEntry.next_enqueue_time:type_name -> google.protobuf.Timestamp
+	7, // 6: asynq.SchedulerEntry.prev_enqueue_time:type_name -> google.protobuf.Timestamp
+	7, // 7: asynq.SchedulerEnqueueEvent.enqueue_time:type_name -> google.protobuf.Timestamp
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_asynq_proto_init() }
@@ -709,7 +724,7 @@ func file_asynq_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_asynq_proto_rawDesc), len(file_asynq_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

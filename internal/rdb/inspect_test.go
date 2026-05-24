@@ -395,6 +395,12 @@ func TestHistoricalStats(t *testing.T) {
 }
 
 func TestRedisInfo(t *testing.T) {
+	if miniredisServer != nil {
+		// miniredis's INFO command returns a minimal stub without the standard
+		// real-Redis fields (redis_version, uptime_in_days, …). Skip when we're
+		// running against the in-process fallback rather than a real server.
+		t.Skip("miniredis does not implement the full INFO command")
+	}
 	r := setup(t)
 	defer r.Close()
 

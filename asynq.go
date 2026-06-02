@@ -515,6 +515,7 @@ func parseRedisURI(u *url.URL) (RedisConnOpt, error) {
 		redisConnOpt.TLSConfig = &tls.Config{ServerName: h}
 	}
 
+	redisConnOpt.Username = u.User.Username()
 	redisConnOpt.Addr = u.Host
 	redisConnOpt.Password = password
 	redisConnOpt.DB = db
@@ -540,7 +541,7 @@ func parseRedisSocketURI(u *url.URL) (RedisConnOpt, error) {
 	if v, ok := u.User.Password(); ok {
 		password = v
 	}
-	return RedisClientOpt{Network: "unix", Addr: u.Path, DB: db, Password: password}, nil
+	return RedisClientOpt{Network: "unix", Username: u.User.Username(), Addr: u.Path, DB: db, Password: password}, nil
 }
 
 func parseRedisSentinelURI(u *url.URL) (RedisConnOpt, error) {

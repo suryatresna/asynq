@@ -9,6 +9,19 @@ import (
 	"github.com/heimdalr/dag"
 )
 
+// FlowParams holds key-value pairs produced by a step and consumed by downstream steps.
+type FlowParams map[string]interface{}
+
+// StepFunc is a job function that receives merged output params from all parent steps
+// and returns its own output params for downstream steps.
+type StepFunc func(ctx context.Context, t *Task, in FlowParams) (FlowParams, error)
+
+// handlerEntry holds either a legacy job function or a step function.
+type handlerEntry struct {
+	fn     func(ctx context.Context, t *Task) error
+	stepFn StepFunc
+}
+
 type Workflow struct {
 	mu sync.RWMutex
 	// flow define the flow
@@ -18,7 +31,8 @@ type Workflow struct {
 	opts []WorkflowOptionInterface
 
 	// routes define the routes
-	routes map[string]Handler
+	routes     map[string]Handler
+	stepRoutes map[string]StepFunc
 }
 
 type WorkflowOption struct {
@@ -66,6 +80,9 @@ type FlowInterface interface {
 	ListFlow() string
 
 	Job(name string, fn func(ctx context.Context, t *Task) error) (string, error)
+	// Step registers a job that receives merged output params from all parent steps
+	// and returns its own output params for downstream steps to consume or override.
+	Step(name string, fn StepFunc) (string, error)
 	GetName() string
 	ProcessSequence(ctx context.Context, t *Task) error
 	DescribeFlow() string
@@ -83,6 +100,7 @@ func NewWorkflow(opts ...WorkflowOptionInterface) *Workflow {
 
 func (a *Workflow) RegisterRoutes(mux *ServeMux) {
 	a.routes = mux.GetAllRoutes()
+	a.stepRoutes = mux.GetAllStepRoutes()
 }
 
 func (a *Workflow) InitiateAllFlows() {
@@ -95,7 +113,18 @@ func (a *Workflow) InitiateAllFlows() {
 
 		mapVertex := make(map[string]string)
 
+		for name, fn := range a.stepRoutes {
+			vertexID, err := flow.Step(name, fn)
+			if err != nil {
+				fmt.Printf("[ERR] error adding step: %s\n", err)
+			}
+			mapVertex[name] = vertexID
+		}
+
 		for name, hdl := range a.routes {
+			if _, isStep := a.stepRoutes[name]; isStep {
+				continue // already registered via Step
+			}
 			vertexID, err := flow.Job(name, hdl.ProcessTask)
 			if err != nil {
 				fmt.Printf("[ERR] error adding job: %s\n", err)
@@ -122,7 +151,7 @@ func (a *Workflow) NewFlow(flowname string) FlowInterface {
 	return &Flow{
 		name:       flowname,
 		dag:        dag.NewDAG(),
-		mapHandler: make(map[string]func(ctx context.Context, t *Task) error),
+		mapHandler: make(map[string]handlerEntry),
 		nodes:      []string{},
 		jobs:       []string{},
 	}
@@ -132,7 +161,7 @@ type Flow struct {
 	mu          sync.RWMutex
 	name        string
 	dag         *dag.DAG
-	mapHandler  map[string]func(ctx context.Context, t *Task) error
+	mapHandler  map[string]handlerEntry
 	firstVertex string
 	nodes       []string
 	jobs        []string
@@ -171,7 +200,19 @@ func (f *Flow) Job(name string, fn func(ctx context.Context, t *Task) error) (st
 	if err != nil {
 		return "", err
 	}
-	f.mapHandler[adVal] = fn
+	f.mapHandler[adVal] = handlerEntry{fn: fn}
+	f.jobs = append(f.jobs, adVal)
+	return adVal, nil
+}
+
+// Step registers a job that can read params from parent steps and pass params to child steps.
+// Use Job instead if the step does not need to exchange params with adjacent steps.
+func (f *Flow) Step(name string, fn StepFunc) (string, error) {
+	adVal, err := f.dag.AddVertex(name)
+	if err != nil {
+		return "", err
+	}
+	f.mapHandler[adVal] = handlerEntry{stepFn: fn}
 	f.jobs = append(f.jobs, adVal)
 	return adVal, nil
 }
@@ -209,17 +250,6 @@ func (f *Flow) DescribeFlow() string {
 }
 
 func (f *Flow) runSequence() error {
-	// Get the first vertex in the flow.
-	// firstVertex := ""
-
-	// for id, name := range f.dag.GetVertices() {
-	// 	if val, ok := name.(string); ok {
-	// 		if id == f.firstVertex {
-	// 			firstVertex = id
-	// 		}
-	// 	}
-	// }
-
 	res, err := f.dag.DescendantsFlow(f.firstVertex, nil, f.flowCallback)
 	if err != nil {
 		return errors.New("error processing flow, detail " + err.Error())
@@ -236,32 +266,45 @@ func (f *Flow) runSequence() error {
 
 func (f *Flow) flowCallback(d *dag.DAG, id string, parentResults []dag.FlowResult) (interface{}, error) {
 	v, _ := d.GetVertex(id)
-	// var parents []interface{}
-	// for _, r := range parentResults {
-	// 	p, _ := d.GetVertex(r.ID)
-	// 	parents = append(parents, p)
-	// }
+
+	// Merge output params from all parent steps; later parents overwrite earlier ones on key collision.
+	merged := FlowParams{}
+	for _, r := range parentResults {
+		if params, ok := r.Result.(FlowParams); ok {
+			for k, val := range params {
+				merged[k] = val
+			}
+		}
+	}
 
 	ctx := context.Background()
-	fn, err := f.getJobFunction(id)
+	entry, err := f.getHandlerEntry(id)
 	if err != nil {
 		return nil, errors.New("no function registered for job, detail " + err.Error())
 	}
-	// fmt.Printf("%v based on: %+v\n", v, parents)
+
 	if val, ok := v.(string); ok {
 		f.task.typename = val
 	}
-	if err := fn(ctx, f.task); err != nil {
+
+	if entry.stepFn != nil {
+		out, err := entry.stepFn(ctx, f.task, merged)
+		if err != nil {
+			return nil, errors.New("error processing job, detail " + err.Error())
+		}
+		return out, nil
+	}
+
+	if err := entry.fn(ctx, f.task); err != nil {
 		return nil, errors.New("error processing job, detail " + err.Error())
 	}
-
-	return v, nil
+	return nil, nil
 }
 
-func (f *Flow) getJobFunction(name string) (func(ctx context.Context, t *Task) error, error) {
-	fn, ok := f.mapHandler[name]
+func (f *Flow) getHandlerEntry(id string) (handlerEntry, error) {
+	entry, ok := f.mapHandler[id]
 	if !ok {
-		return nil, fmt.Errorf("no function registered for job: %s", name)
+		return handlerEntry{}, fmt.Errorf("no function registered for job: %s", id)
 	}
-	return fn, nil
+	return entry, nil
 }

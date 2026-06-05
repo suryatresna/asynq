@@ -263,6 +263,63 @@ func main() {
 }
 ```
 
+### Workflow: chaining tasks with parameter passing
+
+Use `HandleStep` instead of `HandleFunc` when a handler needs to receive output from its upstream step or pass data to the next one. Steps are wired together by `RegisterFlow` + `SetFlows` and executed in topological order.
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/suryatresna/asynq"
+)
+
+const redisAddr = "127.0.0.1:6379"
+
+func main() {
+    srv := asynq.NewServer(
+        asynq.RedisClientOpt{Addr: redisAddr},
+        asynq.Config{Concurrency: 10},
+    )
+
+    mux := asynq.NewServeMux()
+
+    // HandleStep — receives params from parent steps, returns params for child steps.
+    mux.HandleStep("jobA", func(ctx context.Context, t *asynq.Task, in asynq.FlowParams) (asynq.FlowParams, error) {
+        log.Printf("jobA running, input params: %v", in)
+        // Produce output that jobB will receive.
+        return asynq.FlowParams{"order_id": 42, "amount": 9.99}, nil
+    })
+
+    mux.HandleStep("jobB", func(ctx context.Context, t *asynq.Task, in asynq.FlowParams) (asynq.FlowParams, error) {
+        // Receive params produced by jobA.
+        orderID := in["order_id"]
+        amount  := in["amount"]
+        log.Printf("jobB processing order %v for amount %v", orderID, amount)
+        // Override or extend params for the next step.
+        return asynq.FlowParams{"order_id": orderID, "status": "processed"}, nil
+    })
+
+    // Define the flow: jobA → jobB
+    flow1 := asynq.RegisterFlow("flowA")
+    flow1.SetFlows("step1", "jobA", "jobB")
+
+    mux.UseWorkflow(asynq.NewWorkflow(flow1))
+
+    // Enqueue a "flowA" task to trigger the entire chain.
+    // client.Enqueue(asynq.NewTask("flowA", payload))
+
+    if err := srv.Run(mux); err != nil {
+        log.Fatalf("could not run server: %v", err)
+    }
+}
+```
+
+Steps registered with `HandleFunc` (legacy) also work in a workflow — they just don't receive or produce `FlowParams`.
+
 For a more detailed walk-through of the library, see our [Getting Started](https://github.com/suryatresna/asynq/wiki/Getting-Started) guide.
 
 To learn more about `asynq` features and APIs, see the package [godoc](https://godoc.org/github.com/suryatresna/asynq).

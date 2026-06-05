@@ -389,7 +389,9 @@ graph DataPipeline
 	mux.HandleStep("validate", handleValidate)
 	mux.HandleStep("load", handleLoad)
 	mux.HandleStep("alert", handleAlert)
-	mux.UseWorkflow(NewWorkflow(flow))
+	if err := mux.UseWorkflow(NewWorkflow(flow)); err != nil {
+		t.Fatalf("UseWorkflow: %v", err)
+	}
 
 	if err := mux.ProcessTask(context.Background(), NewTask("DataPipeline", nil)); err != nil {
 		t.Fatalf("ProcessTask: %v", err)
@@ -457,8 +459,8 @@ graph DataPipeline
 // matching handler (it logs "[ERR] error adding edge").  The three tests
 // below pin the resulting runtime behaviour so regressions are caught.
 
-// TestWorkflow_MissingHandler_NoneRegistered: if no handler in the flow is
-// registered at all the DAG is empty and ProcessTask returns an error.
+// TestWorkflow_MissingHandler_NoneRegistered: if no handlers in the flow are
+// registered, UseWorkflow returns a validation error listing all missing names.
 func TestWorkflow_MissingHandler_NoneRegistered(t *testing.T) {
 	mux := NewServeMux()
 	// intentionally register nothing
@@ -471,29 +473,23 @@ graph Pipeline
 	if err != nil {
 		t.Fatalf("RegisterFlowMarkdown: %v", err)
 	}
-	mux.UseWorkflow(NewWorkflow(flow))
 
-	err = mux.ProcessTask(context.Background(), NewTask("Pipeline", nil))
+	err = mux.UseWorkflow(NewWorkflow(flow))
 	if err == nil {
-		t.Fatal("expected error when no handlers are registered, got nil")
+		t.Fatal("expected UseWorkflow to return error for unregistered handlers, got nil")
 	}
-	if !strings.Contains(err.Error(), "flow is empty") {
-		t.Errorf("want 'flow is empty' error, got: %v", err)
+	for _, missing := range []string{"ingest", "validate", "load"} {
+		if !strings.Contains(err.Error(), missing) {
+			t.Errorf("error should mention missing handler %q: %v", missing, err)
+		}
 	}
 }
 
-// TestWorkflow_MissingHandler_TailStepsMissing: when the first step is
-// registered but the downstream steps are not, only the first step executes
-// and ProcessTask returns nil (silent partial execution).
+// TestWorkflow_MissingHandler_TailStepsMissing: when downstream steps are not
+// registered, UseWorkflow returns a validation error listing the missing names.
 func TestWorkflow_MissingHandler_TailStepsMissing(t *testing.T) {
-	var mu sync.Mutex
-	var called []string
-
 	mux := NewServeMux()
 	mux.HandleStep("ingest", func(_ context.Context, _ *Task, _ FlowParams) (FlowParams, error) {
-		mu.Lock()
-		called = append(called, "ingest")
-		mu.Unlock()
 		return FlowParams{"id": 1}, nil
 	})
 	// "validate" and "load" intentionally not registered
@@ -506,39 +502,31 @@ graph Pipeline
 	if err != nil {
 		t.Fatalf("RegisterFlowMarkdown: %v", err)
 	}
-	mux.UseWorkflow(NewWorkflow(flow))
 
-	if err := mux.ProcessTask(context.Background(), NewTask("Pipeline", nil)); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	err = mux.UseWorkflow(NewWorkflow(flow))
+	if err == nil {
+		t.Fatal("expected UseWorkflow to return error for unregistered handlers, got nil")
 	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(called) != 1 || called[0] != "ingest" {
-		t.Errorf("called = %v, want [ingest]", called)
+	for _, missing := range []string{"validate", "load"} {
+		if !strings.Contains(err.Error(), missing) {
+			t.Errorf("error should mention missing handler %q: %v", missing, err)
+		}
+	}
+	if strings.Contains(err.Error(), "ingest") {
+		t.Errorf("error should not mention registered handler 'ingest': %v", err)
 	}
 }
 
-// TestWorkflow_MissingHandler_MidChainMissing: when a step in the middle of
-// the chain is absent from the mux, the edges crossing that gap are dropped.
-// Steps before the gap run normally; steps after the gap — even if registered
-// — are unreachable and never invoked.
+// TestWorkflow_MissingHandler_MidChainMissing: when a handler in the middle of
+// the chain is absent from the mux, UseWorkflow returns a validation error
+// naming specifically that missing handler.
 func TestWorkflow_MissingHandler_MidChainMissing(t *testing.T) {
-	var mu sync.Mutex
-	var called []string
-
 	mux := NewServeMux()
 	mux.HandleStep("ingest", func(_ context.Context, _ *Task, _ FlowParams) (FlowParams, error) {
-		mu.Lock()
-		called = append(called, "ingest")
-		mu.Unlock()
 		return FlowParams{"id": 1}, nil
 	})
 	// "validate" is the missing middle step
-	mux.HandleStep("load", func(_ context.Context, _ *Task, in FlowParams) (FlowParams, error) {
-		mu.Lock()
-		called = append(called, "load")
-		mu.Unlock()
+	mux.HandleStep("load", func(_ context.Context, _ *Task, _ FlowParams) (FlowParams, error) {
 		return nil, nil
 	})
 
@@ -550,15 +538,18 @@ graph Pipeline
 	if err != nil {
 		t.Fatalf("RegisterFlowMarkdown: %v", err)
 	}
-	mux.UseWorkflow(NewWorkflow(flow))
 
-	if err := mux.ProcessTask(context.Background(), NewTask("Pipeline", nil)); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	err = mux.UseWorkflow(NewWorkflow(flow))
+	if err == nil {
+		t.Fatal("expected UseWorkflow to return error for missing 'validate' handler, got nil")
 	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(called) != 1 || called[0] != "ingest" {
-		t.Errorf("called = %v, want [ingest]; load must not run because its only path goes through the missing validate step", called)
+	if !strings.Contains(err.Error(), "validate") {
+		t.Errorf("error should mention missing handler 'validate': %v", err)
+	}
+	for _, registered := range []string{"ingest", "load"} {
+		if strings.Contains(err.Error(), registered) {
+			t.Errorf("error should not mention registered handler %q: %v", registered, err)
+		}
 	}
 }
+

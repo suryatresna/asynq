@@ -57,19 +57,19 @@ func (mux *ServeMux) ProcessTask(ctx context.Context, task *Task) error {
 	return h.ProcessTask(ctx, task)
 }
 
-func (mux *ServeMux) UseWorkflow(wf *Workflow) {
+// UseWorkflow wires a Workflow into the mux. It validates that every handler
+// name referenced in the workflow's flow edges is registered before building
+// the DAG. Returns an error if any handler is missing.
+func (mux *ServeMux) UseWorkflow(wf *Workflow) error {
 	wf.RegisterRoutes(mux)
+	if err := wf.ValidateHandlers(); err != nil {
+		return err
+	}
 	wf.InitiateAllFlows()
-
-	flows := wf.GetAllFlows()
-	for _, flow := range flows {
+	for _, flow := range wf.GetAllFlows() {
 		mux.Handle(flow.GetName(), HandlerFunc(flow.ProcessSequence))
 	}
-	// for job, hdl := range mux.GetAllRoutes() {
-	// 	flow.Job(job, hdl.ProcessTask)
-	// }
-
-	// mux.Handle(flow.GetName(), HandlerFunc(flow.ProcessSequence))
+	return nil
 }
 
 // Handler returns the handler to use for the given task.

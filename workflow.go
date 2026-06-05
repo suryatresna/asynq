@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/heimdalr/dag"
+	"github.com/suryatresna/asynq/internal/log"
 )
 
 // FlowParams holds key-value pairs produced by a step and consumed by downstream steps.
@@ -33,6 +36,8 @@ type Workflow struct {
 	// routes define the routes
 	routes     map[string]Handler
 	stepRoutes map[string]StepFunc
+
+	logger *log.Logger
 }
 
 type WorkflowOption struct {
@@ -94,13 +99,48 @@ type WorkflowInterface interface {
 
 func NewWorkflow(opts ...WorkflowOptionInterface) *Workflow {
 	return &Workflow{
-		opts: opts,
+		opts:   opts,
+		logger: log.NewLogger(nil),
 	}
 }
 
 func (a *Workflow) RegisterRoutes(mux *ServeMux) {
 	a.routes = mux.GetAllRoutes()
 	a.stepRoutes = mux.GetAllStepRoutes()
+}
+
+// ValidateHandlers checks that every handler name referenced in the workflow's
+// flow edges is registered in the mux. It must be called after RegisterRoutes.
+// Returns a descriptive error listing each flow and its missing handler names.
+func (a *Workflow) ValidateHandlers() error {
+	var flowErrs []error
+	for _, opt := range a.opts {
+		seen := map[string]bool{}
+		var missing []string
+		for _, pf := range opt.GetFlows() {
+			for _, name := range []string{pf.from, pf.to} {
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				_, inRoutes := a.routes[name]
+				_, inStepRoutes := a.stepRoutes[name]
+				if !inRoutes && !inStepRoutes {
+					missing = append(missing, name)
+				}
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			flowErrs = append(flowErrs,
+				fmt.Errorf("flow %q: unregistered handlers: %s",
+					opt.GetNameGroup(), strings.Join(missing, ", ")))
+		}
+	}
+	if len(flowErrs) > 0 {
+		return errors.Join(flowErrs...)
+	}
+	return nil
 }
 
 func (a *Workflow) InitiateAllFlows() {
@@ -116,7 +156,7 @@ func (a *Workflow) InitiateAllFlows() {
 		for name, fn := range a.stepRoutes {
 			vertexID, err := flow.Step(name, fn)
 			if err != nil {
-				fmt.Printf("[ERR] error adding step: %s\n", err)
+				a.logger.Errorf("error adding step %q: %v", name, err)
 			}
 			mapVertex[name] = vertexID
 		}
@@ -127,17 +167,17 @@ func (a *Workflow) InitiateAllFlows() {
 			}
 			vertexID, err := flow.Job(name, hdl.ProcessTask)
 			if err != nil {
-				fmt.Printf("[ERR] error adding job: %s\n", err)
+				a.logger.Errorf("error adding job %q: %v", name, err)
 			}
 			mapVertex[name] = vertexID
 		}
 
 		for _, flowItems := range optFlows {
 			if err := flow.Edge(flowItems.name, mapVertex[flowItems.from], mapVertex[flowItems.to]); err != nil {
-				fmt.Printf("[ERR] error adding edge: %s\n", err)
+				a.logger.Errorf("error adding edge %q (%s -> %s): %v", flowItems.name, flowItems.from, flowItems.to, err)
 			}
 		}
-		fmt.Printf("[INFO] flow %s: %s\n", opt.GetNameGroup(), flow.DescribeFlow())
+		a.logger.Infof("flow %q wired: %s", opt.GetNameGroup(), flow.DescribeFlow())
 		flows[opt.GetNameGroup()] = flow
 	}
 	a.flows = flows

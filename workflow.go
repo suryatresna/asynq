@@ -283,19 +283,22 @@ func (f *Flow) flowCallback(d *dag.DAG, id string, parentResults []dag.FlowResul
 		return nil, errors.New("no function registered for job, detail " + err.Error())
 	}
 
+	// Shallow-copy the task so concurrent steps (e.g. fan-out siblings) each
+	// get an independent typename field without racing on f.task.
+	stepTask := *f.task
 	if val, ok := v.(string); ok {
-		f.task.typename = val
+		stepTask.typename = val
 	}
 
 	if entry.stepFn != nil {
-		out, err := entry.stepFn(ctx, f.task, merged)
+		out, err := entry.stepFn(ctx, &stepTask, merged)
 		if err != nil {
 			return nil, errors.New("error processing job, detail " + err.Error())
 		}
 		return out, nil
 	}
 
-	if err := entry.fn(ctx, f.task); err != nil {
+	if err := entry.fn(ctx, &stepTask); err != nil {
 		return nil, errors.New("error processing job, detail " + err.Error())
 	}
 	return nil, nil

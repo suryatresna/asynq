@@ -235,10 +235,8 @@ func TestFlow_ProcessSequence_RunsHandlersInOrder(t *testing.T) {
 	if order[0] != "a" || order[1] != "b" || order[2] != "c" {
 		t.Errorf("execution order = %v, want [a b c]", order)
 	}
-	// The task's typename should reflect the last executed vertex.
-	if task.Type() != "step-c" {
-		t.Errorf("task.Type() = %q, want %q", task.Type(), "step-c")
-	}
+	// The original task's typename is not mutated; each step receives its own
+	// shallow copy so concurrent fan-out siblings don't race on that field.
 }
 
 func TestFlow_ProcessSequence_EmptyFlow(t *testing.T) {

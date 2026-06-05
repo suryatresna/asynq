@@ -320,6 +320,52 @@ func main() {
 
 Steps registered with `HandleFunc` (legacy) also work in a workflow — they just don't receive or produce `FlowParams`.
 
+### Workflow: defining flows with Mermaid-like markdown
+
+Instead of calling `SetFlows` manually, you can describe the DAG in a Mermaid-like markdown string and pass it to `RegisterFlowMarkdown`.
+
+```go
+workflowMarkdown := `
+graph DataPipeline
+    ingest[Start Data Ingestion] --> clean(Clean Datasets)
+    ingest --> fetch(Fetch API Logs)
+    clean --> validate{Run Validations}
+    fetch --> validate
+    validate -->|Pass| load[Load to Data Warehouse]
+    validate -->|Fail| alert[Trigger Alert]
+`
+
+flow, err := asynq.RegisterFlowMarkdown(workflowMarkdown)
+if err != nil {
+    log.Fatal(err)
+}
+
+mux := asynq.NewServeMux()
+mux.HandleStep("ingest",   handleIngest)
+mux.HandleStep("clean",    handleClean)
+mux.HandleStep("fetch",    handleFetch)
+mux.HandleStep("validate", handleValidate)
+mux.HandleStep("load",     handleLoad)
+mux.HandleStep("alert",    handleAlert)
+
+mux.UseWorkflow(asynq.NewWorkflow(flow))
+srv.Run(mux)
+```
+
+**Supported syntax**
+
+| Syntax | Meaning |
+|---|---|
+| `graph Name` | Flow group name (required header) |
+| `A --> B` | Simple edge (label auto-generated as `A->B`) |
+| `A -->|label| B` | Edge with an explicit label |
+| `A[Display text]` | Rectangle node annotation (cosmetic only) |
+| `A(Display text)` | Rounded node annotation (cosmetic only) |
+| `A{Display text}` | Diamond node annotation (cosmetic only) |
+| `%% comment` | Comment line (ignored) |
+
+Node IDs (`ingest`, `clean`, …) must match the handler names passed to `mux.HandleStep` / `mux.HandleFunc` exactly. Display annotations are discarded during wiring.
+
 For a more detailed walk-through of the library, see our [Getting Started](https://github.com/suryatresna/asynq/wiki/Getting-Started) guide.
 
 To learn more about `asynq` features and APIs, see the package [godoc](https://godoc.org/github.com/suryatresna/asynq).

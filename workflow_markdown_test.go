@@ -517,6 +517,319 @@ graph Pipeline
 	}
 }
 
+// ---- subgraph tests ----
+
+// TestParseMarkdown_Subgraph_BasicExpansion: a subgraph referenced by name in the
+// parent graph is expanded to its entry node.
+func TestParseMarkdown_Subgraph_BasicExpansion(t *testing.T) {
+	g, err := parseMarkdown(`
+graph Pipeline
+    clean --> DataValidation
+
+    subgraph DataValidation [DataValidation]
+        validate --> check
+        check --> done
+    end
+`)
+	if err != nil {
+		t.Fatalf("parseMarkdown: %v", err)
+	}
+
+	// "clean --> DataValidation" should become "clean --> validate" (entry node).
+	wantEdge := func(from, to string) {
+		for _, e := range g.edges {
+			if e.from == from && e.to == to {
+				return
+			}
+		}
+		t.Errorf("expected edge %s-->%s not found in %+v", from, to, g.edges)
+	}
+	wantEdge("clean", "validate")
+	wantEdge("validate", "check")
+	wantEdge("check", "done")
+
+	// The raw "clean --> DataValidation" edge must be gone.
+	for _, e := range g.edges {
+		if e.to == "DataValidation" {
+			t.Errorf("unexpected edge targeting subgraph name: %+v", e)
+		}
+	}
+
+	// All subgraph nodes absorbed into parent.
+	for _, id := range []string{"validate", "check", "done"} {
+		if _, ok := g.nodes[id]; !ok {
+			t.Errorf("expected node %q to be present in graph", id)
+		}
+	}
+}
+
+// TestParseMarkdown_Subgraph_FanIn: two parent edges targeting the same subgraph
+// both expand to the subgraph's single entry node.
+func TestParseMarkdown_Subgraph_FanIn(t *testing.T) {
+	g, err := parseMarkdown(`
+graph Pipeline
+    clean --> DataValidation
+    fetch --> DataValidation
+
+    subgraph DataValidation [DataValidation]
+        validate --> check
+    end
+`)
+	if err != nil {
+		t.Fatalf("parseMarkdown: %v", err)
+	}
+
+	countEdgesTo := func(to string) int {
+		n := 0
+		for _, e := range g.edges {
+			if e.to == to {
+				n++
+			}
+		}
+		return n
+	}
+
+	if countEdgesTo("validate") != 2 {
+		t.Errorf("expected 2 edges to entry node 'validate', got %d (edges: %+v)", countEdgesTo("validate"), g.edges)
+	}
+	if countEdgesTo("DataValidation") != 0 {
+		t.Errorf("expected 0 edges to subgraph name, got %d", countEdgesTo("DataValidation"))
+	}
+}
+
+// TestParseMarkdown_Subgraph_ExitEdgesPassThrough: edges from subgraph nodes to
+// external nodes are parsed as normal edges and kept as-is.
+func TestParseMarkdown_Subgraph_ExitEdgesPassThrough(t *testing.T) {
+	g, err := parseMarkdown(`
+graph Pipeline
+    start --> DataValidation
+
+    subgraph DataValidation [DataValidation]
+        validate --> check
+        check --> done
+        check --> alert
+    end
+
+    done --> load
+    alert --> load
+`)
+	if err != nil {
+		t.Fatalf("parseMarkdown: %v", err)
+	}
+
+	wantEdge := func(from, to string) {
+		for _, e := range g.edges {
+			if e.from == from && e.to == to {
+				return
+			}
+		}
+		t.Errorf("expected edge %s-->%s not found", from, to)
+	}
+	wantEdge("done", "load")
+	wantEdge("alert", "load")
+}
+
+// TestParseMarkdown_Subgraph_DirectionIgnored: "direction LR" inside a subgraph
+// is silently ignored and does not cause a parse error.
+func TestParseMarkdown_Subgraph_DirectionIgnored(t *testing.T) {
+	_, err := parseMarkdown(`
+graph Pipeline
+    start --> Validation
+
+    subgraph Validation [Validation]
+        direction LR
+        a --> b
+    end
+`)
+	if err != nil {
+		t.Fatalf("parseMarkdown returned error for 'direction' line: %v", err)
+	}
+}
+
+// TestParseMarkdown_Subgraph_UnclosedError: a subgraph block with no "end" line
+// must return an error.
+func TestParseMarkdown_Subgraph_UnclosedError(t *testing.T) {
+	_, err := parseMarkdown(`
+graph Pipeline
+    start --> Validation
+
+    subgraph Validation [Validation]
+        a --> b
+`)
+	if err == nil {
+		t.Fatal("expected error for unclosed subgraph, got nil")
+	}
+	if !strings.Contains(err.Error(), "unclosed subgraph") {
+		t.Errorf("error should mention 'unclosed subgraph', got: %v", err)
+	}
+}
+
+// TestParseMarkdown_Subgraph_DuplicateError: two subgraph blocks with the same
+// name must return an error.
+func TestParseMarkdown_Subgraph_DuplicateError(t *testing.T) {
+	_, err := parseMarkdown(`
+graph Pipeline
+    start --> A
+
+    subgraph A [A]
+        a --> b
+    end
+
+    subgraph A [A]
+        c --> d
+    end
+`)
+	if err == nil {
+		t.Fatal("expected error for duplicate subgraph name, got nil")
+	}
+}
+
+// TestRegisterFlowMarkdown_SubgraphFullExample: the complete DataPipeline example
+// from the design doc parses without error and produces the expected flat edges.
+func TestRegisterFlowMarkdown_SubgraphFullExample(t *testing.T) {
+	opt, err := RegisterFlowMarkdown(`
+graph DataPipeline
+    Ingest[ingest] --> Clean[clean]
+    Ingest --> Fetch[fetch]
+
+    Clean --> DataValidation
+    Fetch --> DataValidation
+
+    subgraph DataValidation [DataValidation]
+        direction LR
+        Validate[validate] --> Check[check]
+        Check --> Done[done]
+        Check --> Alert[alert]
+    end
+
+    Done --> Load[load]
+    Alert --> Load
+`)
+	if err != nil {
+		t.Fatalf("RegisterFlowMarkdown: %v", err)
+	}
+
+	if opt.GetNameGroup() != "DataPipeline" {
+		t.Errorf("flow name = %q, want DataPipeline", opt.GetNameGroup())
+	}
+
+	// Build a quick from→to lookup.
+	type pair struct{ from, to string }
+	edges := make(map[pair]bool)
+	for _, pf := range opt.GetFlows() {
+		edges[pair{pf.from, pf.to}] = true
+	}
+
+	want := []pair{
+		{"Ingest", "Clean"},
+		{"Ingest", "Fetch"},
+		{"Clean", "Validate"},  // expanded from Clean --> DataValidation
+		{"Fetch", "Validate"},  // expanded from Fetch --> DataValidation
+		{"Validate", "Check"},
+		{"Check", "Done"},
+		{"Check", "Alert"},
+		{"Done", "Load"},
+		{"Alert", "Load"},
+	}
+	for _, p := range want {
+		if !edges[p] {
+			t.Errorf("expected edge %s-->%s not found in flows: %+v", p.from, p.to, opt.GetFlows())
+		}
+	}
+	if edges[pair{"Clean", "DataValidation"}] {
+		t.Error("raw 'Clean-->DataValidation' edge should have been expanded away")
+	}
+}
+
+// TestWorkflow_Subgraph_EndToEnd: registers the full DataPipeline markdown and
+// runs ProcessSequence, verifying all nodes execute and params flow correctly.
+func TestWorkflow_Subgraph_EndToEnd(t *testing.T) {
+	var mu sync.Mutex
+	executed := []string{}
+	record := func(name string) func(_ context.Context, _ *Task, in FlowParams) (FlowParams, error) {
+		return func(_ context.Context, _ *Task, in FlowParams) (FlowParams, error) {
+			mu.Lock()
+			executed = append(executed, name)
+			mu.Unlock()
+			out := maps.Clone(in)
+			if out == nil {
+				out = FlowParams{}
+			}
+			out[name] = true
+			return out, nil
+		}
+	}
+
+	mux := NewServeMux()
+	for _, name := range []string{"Ingest", "Clean", "Fetch", "Validate", "Check", "Done", "Alert", "Load"} {
+		mux.HandleStep(name, record(name))
+	}
+
+	opt, err := RegisterFlowMarkdown(`
+graph DataPipeline
+    Ingest[ingest] --> Clean[clean]
+    Ingest --> Fetch[fetch]
+
+    Clean --> DataValidation
+    Fetch --> DataValidation
+
+    subgraph DataValidation [DataValidation]
+        direction LR
+        Validate[validate] --> Check[check]
+        Check --> Done[done]
+        Check --> Alert[alert]
+    end
+
+    Done --> Load[load]
+    Alert --> Load
+`)
+	if err != nil {
+		t.Fatalf("RegisterFlowMarkdown: %v", err)
+	}
+
+	wf := NewWorkflow(opt)
+	if err := mux.UseWorkflow(wf); err != nil {
+		t.Fatalf("UseWorkflow: %v", err)
+	}
+
+	task := NewTask("DataPipeline", nil)
+	flows := wf.GetAllFlows()
+	flow, ok := flows["DataPipeline"]
+	if !ok {
+		t.Fatal("flow 'DataPipeline' not found")
+	}
+	if err := flow.ProcessSequence(context.Background(), task); err != nil {
+		t.Fatalf("ProcessSequence: %v", err)
+	}
+
+	// All 8 handlers must have run.
+	got := make(map[string]bool)
+	for _, name := range executed {
+		got[name] = true
+	}
+	for _, name := range []string{"Ingest", "Clean", "Fetch", "Validate", "Check", "Done", "Alert", "Load"} {
+		if !got[name] {
+			t.Errorf("handler %q did not execute", name)
+		}
+	}
+
+	// Ingest must precede Clean, Fetch, Validate, Check, Done, Alert, Load.
+	indexOf := func(name string) int {
+		for i, n := range executed {
+			if n == name {
+				return i
+			}
+		}
+		return -1
+	}
+	ingestIdx := indexOf("Ingest")
+	for _, name := range []string{"Clean", "Fetch", "Validate", "Check", "Done", "Alert", "Load"} {
+		if indexOf(name) <= ingestIdx {
+			t.Errorf("Ingest (idx %d) should run before %s (idx %d)", ingestIdx, name, indexOf(name))
+		}
+	}
+}
+
 // TestWorkflow_MissingHandler_MidChainMissing: when a handler in the middle of
 // the chain is absent from the mux, UseWorkflow returns a validation error
 // naming specifically that missing handler.

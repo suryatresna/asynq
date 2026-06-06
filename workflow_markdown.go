@@ -21,12 +21,39 @@ func (g *mdGraph) addNode(id string) {
 	g.nodes[id] = struct{}{}
 }
 
+// mdSubgraph holds the nodes and internal edges of a subgraph block.
+type mdSubgraph struct {
+	nodes map[string]struct{}
+	edges []mdEdge
+}
+
+// entryNodes returns node IDs with no incoming edges within the subgraph.
+func (s *mdSubgraph) entryNodes() []string {
+	toSet := make(map[string]struct{})
+	for _, e := range s.edges {
+		toSet[e.to] = struct{}{}
+	}
+	var entries []string
+	for id := range s.nodes {
+		if _, isTarget := toSet[id]; !isTarget {
+			entries = append(entries, id)
+		}
+	}
+	return entries
+}
+
 // mdNodeSpec matches a node reference: id  or  id[label]  or  id(label)  or  id{label}.
 // Only the id (first capture group) is used; the display label is consumed but discarded.
 const mdNodeSpec = `(\w+)(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\})?`
 
 var (
 	mdHeaderRE = regexp.MustCompile(`^\s*graph\s+(\S+)\s*$`)
+
+	// subgraph Name  or  subgraph Name [Display Label]
+	mdSubgraphHeaderRE = regexp.MustCompile(`^\s*subgraph\s+(\w+)(?:\s+\[.*\])?\s*$`)
+
+	// direction LR/TD/TB/RL/BT  (cosmetic inside subgraph — ignored)
+	mdDirectionRE = regexp.MustCompile(`^\s*direction\s+(LR|TD|TB|RL|BT)\s*$`)
 
 	// A -->|label| B
 	mdLabeledEdgeRE = regexp.MustCompile(`^\s*` + mdNodeSpec + `\s*-->\|([^|]+)\|\s*` + mdNodeSpec + `\s*$`)
@@ -40,6 +67,9 @@ var (
 
 func parseMarkdown(src string) (*mdGraph, error) {
 	g := &mdGraph{nodes: make(map[string]struct{})}
+	subgraphs := make(map[string]*mdSubgraph)
+
+	var currentSG *mdSubgraph // non-nil while inside a subgraph block
 
 	lines := strings.Split(strings.ReplaceAll(src, "\r", ""), "\n")
 	for i, raw := range lines {
@@ -47,6 +77,36 @@ func parseMarkdown(src string) (*mdGraph, error) {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "%%") {
 			continue
+		}
+
+		// Close a subgraph block.
+		if currentSG != nil {
+			if line == "end" {
+				currentSG = nil
+				continue
+			}
+			if mdDirectionRE.MatchString(line) {
+				continue
+			}
+			if m := mdLabeledEdgeRE.FindStringSubmatch(line); m != nil {
+				fromID, edgeLabel, toID := m[1], strings.TrimSpace(m[2]), m[3]
+				currentSG.nodes[fromID] = struct{}{}
+				currentSG.nodes[toID] = struct{}{}
+				currentSG.edges = append(currentSG.edges, mdEdge{from: fromID, to: toID, label: edgeLabel})
+				continue
+			}
+			if m := mdSimpleEdgeRE.FindStringSubmatch(line); m != nil {
+				fromID, toID := m[1], m[2]
+				currentSG.nodes[fromID] = struct{}{}
+				currentSG.nodes[toID] = struct{}{}
+				currentSG.edges = append(currentSG.edges, mdEdge{from: fromID, to: toID, label: fromID + "->" + toID})
+				continue
+			}
+			if m := mdNodeOnlyRE.FindStringSubmatch(line); m != nil {
+				currentSG.nodes[m[1]] = struct{}{}
+				continue
+			}
+			return nil, fmt.Errorf("line %d: unrecognized syntax inside subgraph: %q", lineNum, line)
 		}
 
 		if m := mdHeaderRE.FindStringSubmatch(line); m != nil {
@@ -59,6 +119,18 @@ func parseMarkdown(src string) (*mdGraph, error) {
 
 		if g.name == "" {
 			return nil, fmt.Errorf("line %d: expected 'graph <Name>' header before edge definitions", lineNum)
+		}
+
+		// Open a subgraph block.
+		if m := mdSubgraphHeaderRE.FindStringSubmatch(line); m != nil {
+			sgName := m[1]
+			if _, exists := subgraphs[sgName]; exists {
+				return nil, fmt.Errorf("line %d: duplicate subgraph %q", lineNum, sgName)
+			}
+			sg := &mdSubgraph{nodes: make(map[string]struct{})}
+			subgraphs[sgName] = sg
+			currentSG = sg
+			continue
 		}
 
 		// A -->|label| B
@@ -88,8 +160,42 @@ func parseMarkdown(src string) (*mdGraph, error) {
 		return nil, fmt.Errorf("line %d: unrecognized syntax: %q", lineNum, line)
 	}
 
+	if currentSG != nil {
+		return nil, errors.New("unclosed subgraph block: missing 'end'")
+	}
+
 	if g.name == "" {
 		return nil, errors.New("missing 'graph <Name>' header")
+	}
+
+	// Post-processing: flatten subgraphs into the parent graph.
+	if len(subgraphs) > 0 {
+		// Add all subgraph-internal edges and nodes to the parent.
+		for _, sg := range subgraphs {
+			for id := range sg.nodes {
+				g.addNode(id)
+			}
+			g.edges = append(g.edges, sg.edges...)
+		}
+
+		// Expand any parent-level edge whose target is a subgraph name into
+		// edges targeting each entry node of that subgraph.
+		var expanded []mdEdge
+		for _, e := range g.edges {
+			sg, isSGTarget := subgraphs[e.to]
+			if !isSGTarget {
+				expanded = append(expanded, e)
+				continue
+			}
+			entries := sg.entryNodes()
+			if len(entries) == 0 {
+				return nil, fmt.Errorf("subgraph %q has no entry nodes", e.to)
+			}
+			for _, entry := range entries {
+				expanded = append(expanded, mdEdge{from: e.from, to: entry, label: e.from + "->" + entry})
+			}
+		}
+		g.edges = expanded
 	}
 
 	return g, nil

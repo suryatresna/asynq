@@ -362,9 +362,73 @@ srv.Run(mux)
 | `A[Display text]` | Rectangle node annotation (cosmetic only) |
 | `A(Display text)` | Rounded node annotation (cosmetic only) |
 | `A{Display text}` | Diamond node annotation (cosmetic only) |
+| `subgraph Name [...] … end` | Inline subflow (see below) |
+| `direction LR\|TD\|…` | Subgraph direction hint (cosmetic only) |
 | `%% comment` | Comment line (ignored) |
 
 Node IDs (`ingest`, `clean`, …) must match the handler names passed to `mux.HandleStep` / `mux.HandleFunc` exactly. Display annotations are discarded during wiring.
+
+### Workflow: subflows (nested flows)
+
+A `subgraph...end` block groups related steps into a named subflow. The subflow is expanded inline at parse time — all its nodes and edges become part of the parent DAG. This is purely syntactic sugar; no special execution machinery is needed.
+
+```go
+workflowMarkdown := `
+graph DataPipeline
+    %% Main pipeline
+    Ingest[ingest] --> Clean[clean]
+    Ingest --> Fetch[fetch]
+
+    Clean --> DataValidation
+    Fetch --> DataValidation
+
+    %% Inline subflow — groups validation steps visually and semantically
+    subgraph DataValidation [DataValidation]
+        direction LR
+        Validate[validate] --> Check[check]
+        Check --> Done[done]
+        Check --> Alert[alert]
+    end
+
+    %% Exit edges connect subflow terminal nodes back to the main pipeline
+    Done --> Load[load]
+    Alert --> Load
+`
+
+flow, err := asynq.RegisterFlowMarkdown(workflowMarkdown)
+if err != nil {
+    log.Fatal(err)
+}
+
+mux := asynq.NewServeMux()
+mux.HandleStep("Ingest",   handleIngest)
+mux.HandleStep("Clean",    handleClean)
+mux.HandleStep("Fetch",    handleFetch)
+mux.HandleStep("Validate", handleValidate)
+mux.HandleStep("Check",    handleCheck)
+mux.HandleStep("Done",     handleDone)
+mux.HandleStep("Alert",    handleAlert)
+mux.HandleStep("Load",     handleLoad)
+
+mux.UseWorkflow(asynq.NewWorkflow(flow))
+srv.Run(mux)
+```
+
+The parser expands the subgraph reference automatically:
+
+- `Clean --> DataValidation` and `Fetch --> DataValidation` are rewritten to target the subgraph's **entry node** (`Validate` — the node with no incoming edges within the subgraph).
+- Internal edges (`Validate → Check → Done`, `Check → Alert`) are flattened into the parent DAG.
+- Exit edges (`Done --> Load`, `Alert --> Load`) are written explicitly in the parent graph.
+
+**Subflow rules**
+
+| Rule | Detail |
+|---|---|
+| Entry node | The subgraph node(s) with no incoming edges *within* the subgraph |
+| Exit edges | Written explicitly as parent-level edges after the `end` keyword |
+| `direction` | Cosmetic only; ignored during wiring |
+| Nesting | Multiple `subgraph` blocks are supported in one `graph` |
+| Unclosed block | A `subgraph` without a matching `end` returns a parse error |
 
 For a more detailed walk-through of the library, see our [Getting Started](https://github.com/suryatresna/asynq/wiki/Getting-Started) guide.
 

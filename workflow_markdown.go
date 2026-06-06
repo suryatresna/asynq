@@ -12,7 +12,6 @@ type mdEdge struct {
 }
 
 type mdGraph struct {
-	name  string
 	nodes map[string]struct{}
 	edges []mdEdge
 }
@@ -47,7 +46,8 @@ func (s *mdSubgraph) entryNodes() []string {
 const mdNodeSpec = `(\w+)(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\})?`
 
 var (
-	mdHeaderRE = regexp.MustCompile(`^\s*graph\s+(\S+)\s*$`)
+	// graph  or  graph LR  or  graph TD  (direction is cosmetic; flow name is passed separately)
+	mdHeaderRE = regexp.MustCompile(`^\s*graph\s*(?:LR|TD|TB|RL|BT)?\s*$`)
 
 	// subgraph Name  or  subgraph Name [Display Label]
 	mdSubgraphHeaderRE = regexp.MustCompile(`^\s*subgraph\s+(\w+)(?:\s+\[.*\])?\s*$`)
@@ -69,6 +69,7 @@ func parseMarkdown(src string) (*mdGraph, error) {
 	g := &mdGraph{nodes: make(map[string]struct{})}
 	subgraphs := make(map[string]*mdSubgraph)
 
+	var headerSeen bool
 	var currentSG *mdSubgraph // non-nil while inside a subgraph block
 
 	lines := strings.Split(strings.ReplaceAll(src, "\r", ""), "\n")
@@ -109,16 +110,16 @@ func parseMarkdown(src string) (*mdGraph, error) {
 			return nil, fmt.Errorf("line %d: unrecognized syntax inside subgraph: %q", lineNum, line)
 		}
 
-		if m := mdHeaderRE.FindStringSubmatch(line); m != nil {
-			if g.name != "" {
+		if mdHeaderRE.MatchString(line) {
+			if headerSeen {
 				return nil, fmt.Errorf("line %d: duplicate 'graph' header", lineNum)
 			}
-			g.name = m[1]
+			headerSeen = true
 			continue
 		}
 
-		if g.name == "" {
-			return nil, fmt.Errorf("line %d: expected 'graph <Name>' header before edge definitions", lineNum)
+		if !headerSeen {
+			return nil, fmt.Errorf("line %d: expected 'graph' header before edge definitions", lineNum)
 		}
 
 		// Open a subgraph block.
@@ -164,8 +165,8 @@ func parseMarkdown(src string) (*mdGraph, error) {
 		return nil, errors.New("unclosed subgraph block: missing 'end'")
 	}
 
-	if g.name == "" {
-		return nil, errors.New("missing 'graph <Name>' header")
+	if !headerSeen {
+		return nil, errors.New("missing 'graph' header")
 	}
 
 	// Post-processing: flatten subgraphs into the parent graph.
@@ -201,32 +202,37 @@ func parseMarkdown(src string) (*mdGraph, error) {
 	return g, nil
 }
 
-// RegisterFlowMarkdown parses a Mermaid-like graph definition and returns a
+// RegisterFlowMarkdown parses a Mermaid graph definition and returns a
 // WorkflowOptionInterface ready to be passed to NewWorkflow.
+//
+// name is the flow group name (matched against the task type when dispatching).
 //
 // Supported syntax:
 //
-//	graph FlowName
+//	graph LR
 //	    A --> B               simple edge (label auto-generated as "A->B")
 //	    A -->|label| B        edge with an explicit label
 //	    A[Display label]      node with a rectangle annotation (cosmetic only)
 //	    A(Display label)      node with a rounded annotation
 //	    A{Display label}      node with a diamond annotation
+//	    subgraph Name [Label]
+//	        X --> Y           subgraph internal edge (expanded inline)
+//	    end
 //	%% comment line
 //
-// Node IDs (A, B, …) must match the handler names registered with
-// mux.HandleFunc or mux.HandleStep. Display annotations are cosmetic and
-// ignored during workflow wiring.
-func RegisterFlowMarkdown(markdown string) (WorkflowOptionInterface, error) {
+// The graph direction (LR, TD, TB, RL, BT) is cosmetic and ignored during
+// wiring. Node IDs must match the handler names registered with
+// mux.HandleFunc or mux.HandleStep.
+func RegisterFlowMarkdown(name, markdown string) (WorkflowOptionInterface, error) {
 	g, err := parseMarkdown(markdown)
 	if err != nil {
 		return nil, err
 	}
 	if len(g.edges) == 0 {
-		return nil, fmt.Errorf("flow %q: no edges defined", g.name)
+		return nil, fmt.Errorf("flow %q: no edges defined", name)
 	}
 	opt := &WorkflowOption{
-		group: g.name,
+		group: name,
 		flows: make([]preFlow, 0, len(g.edges)),
 	}
 	for _, e := range g.edges {

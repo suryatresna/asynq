@@ -12,16 +12,13 @@ import (
 
 func TestParseMarkdown_BasicChain(t *testing.T) {
 	src := `
-graph FlowA
+graph LR
     funA --> funB
     funB --> funC
 `
 	g, err := parseMarkdown(src)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if g.name != "FlowA" {
-		t.Errorf("name = %q, want %q", g.name, "FlowA")
 	}
 	if len(g.edges) != 2 {
 		t.Fatalf("edges = %d, want 2", len(g.edges))
@@ -39,7 +36,7 @@ graph FlowA
 
 func TestParseMarkdown_LabeledEdges(t *testing.T) {
 	src := `
-graph FlowA
+graph LR
     funD -->|Pass| funE
     funD -->|Fail| funF
 `
@@ -60,7 +57,7 @@ graph FlowA
 
 func TestParseMarkdown_NodeShapes(t *testing.T) {
 	src := `
-graph FlowA
+graph LR
     funA[Start Data] --> funB(Clean Data)
     funB --> funC{Validate}
     funC -->|Pass| funD[Done]
@@ -83,7 +80,7 @@ graph FlowA
 
 func TestParseMarkdown_FanOutFanIn(t *testing.T) {
 	src := `
-graph FlowA
+graph LR
     funA --> funB
     funA --> funC
     funB --> funD
@@ -103,7 +100,7 @@ graph FlowA
 
 func TestParseMarkdown_StandaloneNodeDeclaration(t *testing.T) {
 	src := `
-graph FlowA
+graph LR
     orphan[Standalone Node]
     funA --> funB
 `
@@ -122,7 +119,7 @@ graph FlowA
 func TestParseMarkdown_Comments(t *testing.T) {
 	src := `
 %% This is a comment
-graph FlowA
+graph LR
 %% Another comment
     funA --> funB
 `
@@ -130,22 +127,16 @@ graph FlowA
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if g.name != "FlowA" {
-		t.Errorf("name = %q, want %q", g.name, "FlowA")
-	}
 	if len(g.edges) != 1 {
 		t.Errorf("edges = %d, want 1", len(g.edges))
 	}
 }
 
 func TestParseMarkdown_WindowsLineEndings(t *testing.T) {
-	src := "graph FlowA\r\n    funA --> funB\r\n"
+	src := "graph LR\r\n    funA --> funB\r\n"
 	g, err := parseMarkdown(src)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if g.name != "FlowA" {
-		t.Errorf("name = %q, want %q", g.name, "FlowA")
 	}
 	if len(g.edges) != 1 {
 		t.Errorf("edges = %d, want 1", len(g.edges))
@@ -154,22 +145,22 @@ func TestParseMarkdown_WindowsLineEndings(t *testing.T) {
 
 func TestParseMarkdown_MissingHeader_EdgeFirst(t *testing.T) {
 	_, err := parseMarkdown("funA --> funB")
-	if err == nil || !strings.Contains(err.Error(), "expected 'graph <Name>'") {
+	if err == nil || !strings.Contains(err.Error(), "expected 'graph'") {
 		t.Errorf("want header-missing error, got %v", err)
 	}
 }
 
 func TestParseMarkdown_MissingHeader_EmptyInput(t *testing.T) {
 	_, err := parseMarkdown("")
-	if err == nil || !strings.Contains(err.Error(), "missing 'graph <Name>'") {
+	if err == nil || !strings.Contains(err.Error(), "missing 'graph'") {
 		t.Errorf("want missing-header error, got %v", err)
 	}
 }
 
 func TestParseMarkdown_DuplicateHeader(t *testing.T) {
 	src := `
-graph FlowA
-graph FlowB
+graph LR
+graph TD
     funA --> funB
 `
 	_, err := parseMarkdown(src)
@@ -180,7 +171,7 @@ graph FlowB
 
 func TestParseMarkdown_BadSyntax(t *testing.T) {
 	src := `
-graph FlowA
+graph LR
     this line has no valid edge ~~~
 `
 	_, err := parseMarkdown(src)
@@ -190,7 +181,7 @@ graph FlowA
 }
 
 func TestParseMarkdown_ErrorIncludesLineNumber(t *testing.T) {
-	src := "graph FlowA\n    funA --> funB\n    @@bad@@\n"
+	src := "graph LR\n    funA --> funB\n    @@bad@@\n"
 	_, err := parseMarkdown(src)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -204,11 +195,11 @@ func TestParseMarkdown_ErrorIncludesLineNumber(t *testing.T) {
 
 func TestRegisterFlowMarkdown_Basic(t *testing.T) {
 	src := `
-graph FlowA
+graph LR
     funA --> funB
     funB --> funC
 `
-	opt, err := RegisterFlowMarkdown(src)
+	opt, err := RegisterFlowMarkdown("FlowA", src)
 	if err != nil {
 		t.Fatalf("RegisterFlowMarkdown: %v", err)
 	}
@@ -229,11 +220,11 @@ graph FlowA
 
 func TestRegisterFlowMarkdown_LabeledEdgesBecomePrefFlowNames(t *testing.T) {
 	src := `
-graph Pipeline
+graph LR
     validate -->|ok| store
     validate -->|err| notify
 `
-	opt, err := RegisterFlowMarkdown(src)
+	opt, err := RegisterFlowMarkdown("Pipeline", src)
 	if err != nil {
 		t.Fatalf("RegisterFlowMarkdown: %v", err)
 	}
@@ -252,17 +243,17 @@ graph Pipeline
 
 func TestRegisterFlowMarkdown_NoEdgesError(t *testing.T) {
 	src := `
-graph FlowA
+graph LR
     funA[Standalone]
 `
-	_, err := RegisterFlowMarkdown(src)
+	_, err := RegisterFlowMarkdown("FlowA", src)
 	if err == nil || !strings.Contains(err.Error(), "no edges") {
 		t.Errorf("want 'no edges' error, got %v", err)
 	}
 }
 
 func TestRegisterFlowMarkdown_ParseError_Propagated(t *testing.T) {
-	_, err := RegisterFlowMarkdown("funA --> funB")
+	_, err := RegisterFlowMarkdown("FlowA", "funA --> funB")
 	if err == nil {
 		t.Error("want error for missing header, got nil")
 	}
@@ -270,7 +261,7 @@ func TestRegisterFlowMarkdown_ParseError_Propagated(t *testing.T) {
 
 func TestRegisterFlowMarkdown_FullDataPipelineExample(t *testing.T) {
 	src := `
-graph DataPipeline
+graph LR
     ingest[Start Data Ingestion] --> clean(Clean Datasets)
     ingest --> fetch(Fetch API Logs)
     clean --> validate{Run Validations}
@@ -278,7 +269,7 @@ graph DataPipeline
     validate -->|Pass| load[Load to Data Warehouse]
     validate -->|Fail| alert[Trigger Alert]
 `
-	opt, err := RegisterFlowMarkdown(src)
+	opt, err := RegisterFlowMarkdown("DataPipeline", src)
 	if err != nil {
 		t.Fatalf("RegisterFlowMarkdown: %v", err)
 	}
@@ -305,7 +296,7 @@ graph DataPipeline
 
 // Compile-time assertion: RegisterFlowMarkdown returns WorkflowOptionInterface.
 var _ WorkflowOptionInterface = func() WorkflowOptionInterface {
-	opt, _ := RegisterFlowMarkdown("graph T\nA --> B")
+	opt, _ := RegisterFlowMarkdown("T", "graph LR\nA --> B")
 	return opt
 }()
 
@@ -368,7 +359,7 @@ func TestWorkflow_DataPipeline_EndToEnd(t *testing.T) {
 	}
 
 	markdown := `
-graph DataPipeline
+graph LR
     ingest[Start Data Ingestion] --> clean(Clean Datasets)
     ingest --> fetch(Fetch API Logs)
     clean --> validate{Run Validations}
@@ -377,7 +368,7 @@ graph DataPipeline
     validate -->|Fail| alert[Trigger Alert]
 `
 
-	flow, err := RegisterFlowMarkdown(markdown)
+	flow, err := RegisterFlowMarkdown("DataPipeline", markdown)
 	if err != nil {
 		t.Fatalf("RegisterFlowMarkdown: %v", err)
 	}
@@ -465,8 +456,8 @@ func TestWorkflow_MissingHandler_NoneRegistered(t *testing.T) {
 	mux := NewServeMux()
 	// intentionally register nothing
 
-	flow, err := RegisterFlowMarkdown(`
-graph Pipeline
+	flow, err := RegisterFlowMarkdown("Pipeline", `
+graph LR
     ingest --> validate
     validate --> load
 `)
@@ -494,8 +485,8 @@ func TestWorkflow_MissingHandler_TailStepsMissing(t *testing.T) {
 	})
 	// "validate" and "load" intentionally not registered
 
-	flow, err := RegisterFlowMarkdown(`
-graph Pipeline
+	flow, err := RegisterFlowMarkdown("Pipeline", `
+graph LR
     ingest --> validate
     validate --> load
 `)
@@ -523,7 +514,7 @@ graph Pipeline
 // parent graph is expanded to its entry node.
 func TestParseMarkdown_Subgraph_BasicExpansion(t *testing.T) {
 	g, err := parseMarkdown(`
-graph Pipeline
+graph LR
     clean --> DataValidation
 
     subgraph DataValidation [DataValidation]
@@ -567,7 +558,7 @@ graph Pipeline
 // both expand to the subgraph's single entry node.
 func TestParseMarkdown_Subgraph_FanIn(t *testing.T) {
 	g, err := parseMarkdown(`
-graph Pipeline
+graph LR
     clean --> DataValidation
     fetch --> DataValidation
 
@@ -601,7 +592,7 @@ graph Pipeline
 // external nodes are parsed as normal edges and kept as-is.
 func TestParseMarkdown_Subgraph_ExitEdgesPassThrough(t *testing.T) {
 	g, err := parseMarkdown(`
-graph Pipeline
+graph LR
     start --> DataValidation
 
     subgraph DataValidation [DataValidation]
@@ -633,7 +624,7 @@ graph Pipeline
 // is silently ignored and does not cause a parse error.
 func TestParseMarkdown_Subgraph_DirectionIgnored(t *testing.T) {
 	_, err := parseMarkdown(`
-graph Pipeline
+graph LR
     start --> Validation
 
     subgraph Validation [Validation]
@@ -650,7 +641,7 @@ graph Pipeline
 // must return an error.
 func TestParseMarkdown_Subgraph_UnclosedError(t *testing.T) {
 	_, err := parseMarkdown(`
-graph Pipeline
+graph LR
     start --> Validation
 
     subgraph Validation [Validation]
@@ -668,7 +659,7 @@ graph Pipeline
 // name must return an error.
 func TestParseMarkdown_Subgraph_DuplicateError(t *testing.T) {
 	_, err := parseMarkdown(`
-graph Pipeline
+graph LR
     start --> A
 
     subgraph A [A]
@@ -687,8 +678,8 @@ graph Pipeline
 // TestRegisterFlowMarkdown_SubgraphFullExample: the complete DataPipeline example
 // from the design doc parses without error and produces the expected flat edges.
 func TestRegisterFlowMarkdown_SubgraphFullExample(t *testing.T) {
-	opt, err := RegisterFlowMarkdown(`
-graph DataPipeline
+	opt, err := RegisterFlowMarkdown("DataPipeline", `
+graph LR
     Ingest[ingest] --> Clean[clean]
     Ingest --> Fetch[fetch]
 
@@ -765,8 +756,8 @@ func TestWorkflow_Subgraph_EndToEnd(t *testing.T) {
 		mux.HandleStep(name, record(name))
 	}
 
-	opt, err := RegisterFlowMarkdown(`
-graph DataPipeline
+	opt, err := RegisterFlowMarkdown("DataPipeline", `
+graph LR
     Ingest[ingest] --> Clean[clean]
     Ingest --> Fetch[fetch]
 
@@ -843,8 +834,8 @@ func TestWorkflow_MissingHandler_MidChainMissing(t *testing.T) {
 		return nil, nil
 	})
 
-	flow, err := RegisterFlowMarkdown(`
-graph Pipeline
+	flow, err := RegisterFlowMarkdown("Pipeline", `
+graph LR
     ingest --> validate
     validate --> load
 `)

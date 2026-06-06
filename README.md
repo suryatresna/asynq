@@ -326,7 +326,7 @@ Instead of calling `SetFlows` manually, you can describe the DAG in a Mermaid-li
 
 ```go
 workflowMarkdown := `
-graph DataPipeline
+graph LR
     ingest[Start Data Ingestion] --> clean(Clean Datasets)
     ingest --> fetch(Fetch API Logs)
     clean --> validate{Run Validations}
@@ -335,7 +335,7 @@ graph DataPipeline
     validate -->|Fail| alert[Trigger Alert]
 `
 
-flow, err := asynq.RegisterFlowMarkdown(workflowMarkdown)
+flow, err := asynq.RegisterFlowMarkdown("DataPipeline", workflowMarkdown)
 if err != nil {
     log.Fatal(err)
 }
@@ -356,7 +356,7 @@ srv.Run(mux)
 
 | Syntax | Meaning |
 |---|---|
-| `graph Name` | Flow group name (required header) |
+| `graph LR` | Required header; direction (`LR`, `TD`, `TB`, `RL`, `BT`) is cosmetic |
 | `A --> B` | Simple edge (label auto-generated as `A->B`) |
 | `A -->|label| B` | Edge with an explicit label |
 | `A[Display text]` | Rectangle node annotation (cosmetic only) |
@@ -374,7 +374,7 @@ A `subgraph...end` block groups related steps into a named subflow. The subflow 
 
 ```go
 workflowMarkdown := `
-graph DataPipeline
+graph LR
     %% Main pipeline
     Ingest[ingest] --> Clean[clean]
     Ingest --> Fetch[fetch]
@@ -395,7 +395,7 @@ graph DataPipeline
     Alert --> Load
 `
 
-flow, err := asynq.RegisterFlowMarkdown(workflowMarkdown)
+flow, err := asynq.RegisterFlowMarkdown("DataPipeline", workflowMarkdown)
 if err != nil {
     log.Fatal(err)
 }

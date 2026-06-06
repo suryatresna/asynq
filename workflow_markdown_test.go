@@ -714,8 +714,8 @@ graph LR
 	want := []pair{
 		{"Ingest", "Clean"},
 		{"Ingest", "Fetch"},
-		{"Clean", "Validate"},  // expanded from Clean --> DataValidation
-		{"Fetch", "Validate"},  // expanded from Fetch --> DataValidation
+		{"Clean", "Validate"}, // expanded from Clean --> DataValidation
+		{"Fetch", "Validate"}, // expanded from Fetch --> DataValidation
 		{"Validate", "Check"},
 		{"Check", "Done"},
 		{"Check", "Alert"},
@@ -821,6 +821,439 @@ graph LR
 	}
 }
 
+// ---- multiple-subgraph tests ----
+
+// TestWorkflow_MultipleSubgraphs_ParallelMerge verifies a pipeline where Ingest
+// fans out into two independent subgraphs that both feed into a single Store:
+//
+//	Ingest → [Normalize: norm1 → norm2] ──┐
+//	       → [Validate:  val1 → val2 → val3] ──┴→ Store
+//
+// Both subgraphs run concurrently after Ingest. Store executes last (fan-in).
+// FlowParams from both branches must be merged at Store.
+func TestWorkflow_MultipleSubgraphs_ParallelMerge(t *testing.T) {
+	var mu sync.Mutex
+	var executed []string
+	received := map[string]FlowParams{}
+
+	record := func(name string, extra FlowParams) func(_ context.Context, _ *Task, in FlowParams) (FlowParams, error) {
+		return func(_ context.Context, _ *Task, in FlowParams) (FlowParams, error) {
+			mu.Lock()
+			executed = append(executed, name)
+			cp := maps.Clone(in)
+			if cp == nil {
+				cp = FlowParams{}
+			}
+			received[name] = cp
+			mu.Unlock()
+
+			out := maps.Clone(in)
+			if out == nil {
+				out = FlowParams{}
+			}
+			maps.Copy(out, extra)
+			return out, nil
+		}
+	}
+
+	mux := NewServeMux()
+	mux.HandleStep("Ingest", record("Ingest", FlowParams{"ingest_done": true}))
+	mux.HandleStep("norm1", record("norm1", FlowParams{"norm1_done": true}))
+	mux.HandleStep("norm2", record("norm2", FlowParams{"norm2_done": true}))
+	mux.HandleStep("val1", record("val1", FlowParams{"val1_done": true}))
+	mux.HandleStep("val2", record("val2", FlowParams{"val2_done": true}))
+	mux.HandleStep("val3", record("val3", FlowParams{"val3_done": true}))
+	mux.HandleStep("Store", record("Store", nil))
+
+	opt, err := RegisterFlowMarkdown("ETLPipeline", `
+graph LR
+    Ingest --> Normalize
+
+    subgraph Normalize [Normalize]
+        norm1 --> norm2
+    end
+
+    Ingest --> Validate
+
+    subgraph Validate [Validate]
+        val1 --> val2
+        val2 --> val3
+    end
+
+    Validate --> Store
+    Normalize --> Store
+`)
+	if err != nil {
+		t.Fatalf("RegisterFlowMarkdown: %v", err)
+	}
+
+	wf := NewWorkflow(opt)
+	if err := mux.UseWorkflow(wf); err != nil {
+		t.Fatalf("UseWorkflow: %v", err)
+	}
+
+	flows := wf.GetAllFlows()
+	flow, ok := flows["ETLPipeline"]
+	if !ok {
+		t.Fatal("flow 'ETLPipeline' not found")
+	}
+	if err := flow.ProcessSequence(context.Background(), NewTask("ETLPipeline", nil)); err != nil {
+		t.Fatalf("ProcessSequence: %v", err)
+	}
+
+	// All 7 handlers must have executed.
+	gotSet := make(map[string]bool)
+	for _, name := range executed {
+		gotSet[name] = true
+	}
+	for _, name := range []string{"Ingest", "norm1", "norm2", "val1", "val2", "val3", "Store"} {
+		if !gotSet[name] {
+			t.Errorf("handler %q did not execute (executed: %v)", name, executed)
+		}
+	}
+
+	indexOf := func(name string) int {
+		for i, n := range executed {
+			if n == name {
+				return i
+			}
+		}
+		return -1
+	}
+	mustPrecede := func(a, b string) {
+		t.Helper()
+		if indexOf(a) >= indexOf(b) {
+			t.Errorf("expected %s (idx %d) before %s (idx %d); order: %v",
+				a, indexOf(a), b, indexOf(b), executed)
+		}
+	}
+
+	// Ingest must start both branches.
+	mustPrecede("Ingest", "norm1")
+	mustPrecede("Ingest", "val1")
+	// Each subgraph's internal order must hold.
+	mustPrecede("norm1", "norm2")
+	mustPrecede("val1", "val2")
+	mustPrecede("val2", "val3")
+	// Both branches must complete before Store (fan-in).
+	mustPrecede("norm2", "Store")
+	mustPrecede("val3", "Store")
+
+	// Both branches receive ingest_done from Ingest (fan-out).
+	if received["norm1"]["ingest_done"] != true {
+		t.Errorf("norm1 did not receive ingest_done from Ingest; got %v", received["norm1"])
+	}
+	if received["val1"]["ingest_done"] != true {
+		t.Errorf("val1 did not receive ingest_done from Ingest; got %v", received["val1"])
+	}
+	// Store receives params merged from both branches (fan-in).
+	if received["Store"]["norm2_done"] != true {
+		t.Errorf("Store missing norm2_done from Normalize branch; got %v", received["Store"])
+	}
+	if received["Store"]["val3_done"] != true {
+		t.Errorf("Store missing val3_done from Validate branch; got %v", received["Store"])
+	}
+}
+
+// TestWorkflow_MultipleSubgraphs_ParallelFanOut verifies a pipeline where a
+// single node fans out into two parallel subgraphs that then merge:
+//
+//	Ingest → [ProcessA: pA1 → pA2] ──┐
+//	       → [ProcessB: pB1 → pB2] ──┴→ Merge
+//
+// Expected: Ingest runs first; pA1 and pB1 both run (concurrently, order
+// unspecified); their successors pA2 and pB2 follow; Merge runs last.
+// Merge must receive params from both subgraphs.
+func TestWorkflow_MultipleSubgraphs_ParallelFanOut(t *testing.T) {
+	var mu sync.Mutex
+	var executed []string
+	received := map[string]FlowParams{}
+
+	record := func(name string, extra FlowParams) func(_ context.Context, _ *Task, in FlowParams) (FlowParams, error) {
+		return func(_ context.Context, _ *Task, in FlowParams) (FlowParams, error) {
+			mu.Lock()
+			executed = append(executed, name)
+			cp := maps.Clone(in)
+			if cp == nil {
+				cp = FlowParams{}
+			}
+			received[name] = cp
+			mu.Unlock()
+
+			out := maps.Clone(in)
+			if out == nil {
+				out = FlowParams{}
+			}
+			maps.Copy(out, extra)
+			return out, nil
+		}
+	}
+
+	mux := NewServeMux()
+	mux.HandleStep("Ingest", record("Ingest", FlowParams{"source": "raw"}))
+	mux.HandleStep("pA1", record("pA1", FlowParams{"pathA": "step1"}))
+	mux.HandleStep("pA2", record("pA2", FlowParams{"pathA": "step2"}))
+	mux.HandleStep("pB1", record("pB1", FlowParams{"pathB": "step1"}))
+	mux.HandleStep("pB2", record("pB2", FlowParams{"pathB": "step2"}))
+	mux.HandleStep("Merge", record("Merge", nil))
+
+	opt, err := RegisterFlowMarkdown("FanOutPipeline", `
+graph LR
+    Ingest --> ProcessA
+    Ingest --> ProcessB
+
+    subgraph ProcessA [ProcessA]
+        pA1 --> pA2
+    end
+
+    subgraph ProcessB [ProcessB]
+        pB1 --> pB2
+    end
+
+    pA2 --> Merge
+    pB2 --> Merge
+`)
+	if err != nil {
+		t.Fatalf("RegisterFlowMarkdown: %v", err)
+	}
+
+	wf := NewWorkflow(opt)
+	if err := mux.UseWorkflow(wf); err != nil {
+		t.Fatalf("UseWorkflow: %v", err)
+	}
+
+	flows := wf.GetAllFlows()
+	flow, ok := flows["FanOutPipeline"]
+	if !ok {
+		t.Fatal("flow 'FanOutPipeline' not found")
+	}
+	if err := flow.ProcessSequence(context.Background(), NewTask("FanOutPipeline", nil)); err != nil {
+		t.Fatalf("ProcessSequence: %v", err)
+	}
+
+	// All 6 handlers must have executed.
+	gotSet := make(map[string]bool)
+	for _, name := range executed {
+		gotSet[name] = true
+	}
+	for _, name := range []string{"Ingest", "pA1", "pA2", "pB1", "pB2", "Merge"} {
+		if !gotSet[name] {
+			t.Errorf("handler %q did not execute (executed: %v)", name, executed)
+		}
+	}
+
+	indexOf := func(name string) int {
+		for i, n := range executed {
+			if n == name {
+				return i
+			}
+		}
+		return -1
+	}
+	mustPrecede := func(a, b string) {
+		t.Helper()
+		if indexOf(a) >= indexOf(b) {
+			t.Errorf("expected %s (idx %d) before %s (idx %d); order: %v",
+				a, indexOf(a), b, indexOf(b), executed)
+		}
+	}
+
+	// Topological constraints that must hold regardless of concurrency.
+	mustPrecede("Ingest", "pA1")
+	mustPrecede("Ingest", "pB1")
+	mustPrecede("pA1", "pA2")
+	mustPrecede("pB1", "pB2")
+	mustPrecede("pA2", "Merge")
+	mustPrecede("pB2", "Merge")
+
+	// Merge receives params from both branches (fan-in merge).
+	if received["Merge"]["pathA"] != "step2" {
+		t.Errorf("Merge missing pathA from ProcessA branch; got %v", received["Merge"])
+	}
+	if received["Merge"]["pathB"] != "step2" {
+		t.Errorf("Merge missing pathB from ProcessB branch; got %v", received["Merge"])
+	}
+	// Both branches received the root param from Ingest.
+	if received["pA1"]["source"] != "raw" {
+		t.Errorf("pA1 did not receive source from Ingest; got %v", received["pA1"])
+	}
+	if received["pB1"]["source"] != "raw" {
+		t.Errorf("pB1 did not receive source from Ingest; got %v", received["pB1"])
+	}
+}
+
+// TestWorkflow_MultipleSubgraphs_Nested verifies a pipeline with a nested
+// subgraph (SubValidate inside Validate):
+//
+//	Ingest → [Normalize: norm1 → norm2] ──────────────────────────────┐
+//	       → [Validate:                                                │
+//	              val1 → val2 → val3                                   │
+//	                     val2 → [SubValidate: subval1→subval2→subval3] │
+//	                     val3 → valdone                                │
+//	                     SubValidate → valdone                         │
+//	         ] ──────────────────────────────────────────────────────┴→ Store
+//
+// Expected flat DAG after expansion:
+//   Ingest→norm1→norm2→Store
+//   Ingest→val1→val2→val3→valdone→Store
+//                  val2→subval1→subval2→subval3→valdone
+func TestWorkflow_MultipleSubgraphs_Nested(t *testing.T) {
+	var mu sync.Mutex
+	var executed []string
+	received := map[string]FlowParams{}
+
+	record := func(name string, extra FlowParams) func(_ context.Context, _ *Task, in FlowParams) (FlowParams, error) {
+		return func(_ context.Context, _ *Task, in FlowParams) (FlowParams, error) {
+			mu.Lock()
+			executed = append(executed, name)
+			cp := maps.Clone(in)
+			if cp == nil {
+				cp = FlowParams{}
+			}
+			received[name] = cp
+			mu.Unlock()
+
+			out := maps.Clone(in)
+			if out == nil {
+				out = FlowParams{}
+			}
+			maps.Copy(out, extra)
+			return out, nil
+		}
+	}
+
+	mux := NewServeMux()
+	mux.HandleStep("Ingest", record("Ingest", FlowParams{"ingest_done": true}))
+	mux.HandleStep("norm1", record("norm1", FlowParams{"norm1_done": true}))
+	mux.HandleStep("norm2", record("norm2", FlowParams{"norm2_done": true}))
+	mux.HandleStep("val1", record("val1", FlowParams{"val1_done": true}))
+	mux.HandleStep("val2", record("val2", FlowParams{"val2_done": true}))
+	mux.HandleStep("val3", record("val3", FlowParams{"val3_done": true}))
+	mux.HandleStep("subval1", record("subval1", FlowParams{"subval1_done": true}))
+	mux.HandleStep("subval2", record("subval2", FlowParams{"subval2_done": true}))
+	mux.HandleStep("subval3", record("subval3", FlowParams{"subval3_done": true}))
+	mux.HandleStep("valdone", record("valdone", FlowParams{"valdone_done": true}))
+	mux.HandleStep("Store", record("Store", nil))
+
+	opt, err := RegisterFlowMarkdown("NestedPipeline", `
+graph LR
+    Ingest --> Normalize
+
+    subgraph Normalize [Normalize]
+        direction LR
+        norm1 --> norm2
+    end
+
+    Ingest --> Validate
+
+    subgraph Validate [Validate]
+        direction LR
+        val1 --> val2
+        val2 --> val3
+
+        val2 --> SubValidate
+
+        subgraph SubValidate [SubValidate]
+            direction LR
+            subval1 --> subval2
+            subval2 --> subval3
+        end
+
+        val3 --> valdone
+        SubValidate --> valdone
+    end
+
+    Validate --> Store
+    Normalize --> Store
+`)
+	if err != nil {
+		t.Fatalf("RegisterFlowMarkdown: %v", err)
+	}
+
+	wf := NewWorkflow(opt)
+	if err := mux.UseWorkflow(wf); err != nil {
+		t.Fatalf("UseWorkflow: %v", err)
+	}
+
+	flows := wf.GetAllFlows()
+	flow, ok := flows["NestedPipeline"]
+	if !ok {
+		t.Fatal("flow 'NestedPipeline' not found")
+	}
+	if err := flow.ProcessSequence(context.Background(), NewTask("NestedPipeline", nil)); err != nil {
+		t.Fatalf("ProcessSequence: %v", err)
+	}
+
+	// All 11 handlers must have executed.
+	gotSet := make(map[string]bool)
+	for _, name := range executed {
+		gotSet[name] = true
+	}
+	all := []string{"Ingest", "norm1", "norm2", "val1", "val2", "val3", "subval1", "subval2", "subval3", "valdone", "Store"}
+	for _, name := range all {
+		if !gotSet[name] {
+			t.Errorf("handler %q did not execute (executed: %v)", name, executed)
+		}
+	}
+
+	indexOf := func(name string) int {
+		for i, n := range executed {
+			if n == name {
+				return i
+			}
+		}
+		return -1
+	}
+	mustPrecede := func(a, b string) {
+		t.Helper()
+		if indexOf(a) >= indexOf(b) {
+			t.Errorf("expected %s (idx %d) before %s (idx %d); order: %v",
+				a, indexOf(a), b, indexOf(b), executed)
+		}
+	}
+
+	// Normalize branch: Ingest → norm1 → norm2 → Store.
+	mustPrecede("Ingest", "norm1")
+	mustPrecede("norm1", "norm2")
+	mustPrecede("norm2", "Store")
+
+	// Validate branch: Ingest → val1 → val2 (fans out) → val3 → valdone → Store.
+	mustPrecede("Ingest", "val1")
+	mustPrecede("val1", "val2")
+	mustPrecede("val2", "val3")
+	mustPrecede("val3", "valdone")
+	mustPrecede("valdone", "Store")
+
+	// SubValidate nested path: val2 → subval1 → subval2 → subval3 → valdone.
+	mustPrecede("val2", "subval1")
+	mustPrecede("subval1", "subval2")
+	mustPrecede("subval2", "subval3")
+	mustPrecede("subval3", "valdone")
+
+	// Fan-in at Store: both Normalize and Validate must complete before Store.
+	mustPrecede("valdone", "Store")
+	mustPrecede("norm2", "Store")
+
+	// Both branches receive ingest_done from Ingest.
+	if received["norm1"]["ingest_done"] != true {
+		t.Errorf("norm1 missing ingest_done; got %v", received["norm1"])
+	}
+	if received["val1"]["ingest_done"] != true {
+		t.Errorf("val1 missing ingest_done; got %v", received["val1"])
+	}
+	// SubValidate path receives val2_done.
+	if received["subval1"]["val2_done"] != true {
+		t.Errorf("subval1 missing val2_done; got %v", received["subval1"])
+	}
+	// valdone fans in from both val3 and subval3 — must have received both.
+	if received["Store"]["valdone_done"] != true {
+		t.Errorf("Store missing valdone_done; got %v", received["Store"])
+	}
+	if received["Store"]["norm2_done"] != true {
+		t.Errorf("Store missing norm2_done from Normalize branch; got %v", received["Store"])
+	}
+}
+
 // TestWorkflow_MissingHandler_MidChainMissing: when a handler in the middle of
 // the chain is absent from the mux, UseWorkflow returns a validation error
 // naming specifically that missing handler.
@@ -856,4 +1289,3 @@ graph LR
 		}
 	}
 }
-

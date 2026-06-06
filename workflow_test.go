@@ -7,6 +7,7 @@ package asynq
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -234,10 +235,8 @@ func TestFlow_ProcessSequence_RunsHandlersInOrder(t *testing.T) {
 	if order[0] != "a" || order[1] != "b" || order[2] != "c" {
 		t.Errorf("execution order = %v, want [a b c]", order)
 	}
-	// The task's typename should reflect the last executed vertex.
-	if task.Type() != "step-c" {
-		t.Errorf("task.Type() = %q, want %q", task.Type(), "step-c")
-	}
+	// The original task's typename is not mutated; each step receives its own
+	// shallow copy so concurrent fan-out siblings don't race on that field.
 }
 
 func TestFlow_ProcessSequence_EmptyFlow(t *testing.T) {
@@ -284,7 +283,7 @@ func TestFlow_ProcessSequence_HandlerError(t *testing.T) {
 	}
 }
 
-func TestFlow_GetJobFunction(t *testing.T) {
+func TestFlow_GetHandlerEntry(t *testing.T) {
 	wf := NewWorkflow()
 	flow := wf.NewFlow("f").(*Flow)
 
@@ -298,19 +297,163 @@ func TestFlow_GetJobFunction(t *testing.T) {
 		t.Fatalf("Job: %v", err)
 	}
 
-	got, err := flow.getJobFunction(id)
+	entry, err := flow.getHandlerEntry(id)
 	if err != nil {
-		t.Fatalf("getJobFunction: %v", err)
+		t.Fatalf("getHandlerEntry: %v", err)
 	}
-	if err := got(context.Background(), NewTask("t", nil)); err != nil {
+	if entry.fn == nil {
+		t.Fatal("expected fn to be set for Job entry")
+	}
+	if err := entry.fn(context.Background(), NewTask("t", nil)); err != nil {
 		t.Fatalf("invoking returned fn: %v", err)
 	}
 	if !called {
 		t.Error("returned function was not the registered handler")
 	}
 
-	if _, err := flow.getJobFunction("missing-id"); err == nil {
+	if _, err := flow.getHandlerEntry("missing-id"); err == nil {
 		t.Error("expected error for missing id, got nil")
+	}
+}
+
+func TestFlow_Step_Registers(t *testing.T) {
+	wf := NewWorkflow()
+	flow := wf.NewFlow("f").(*Flow)
+
+	fn := func(ctx context.Context, t *Task, in FlowParams) (FlowParams, error) {
+		return FlowParams{"x": 1}, nil
+	}
+	id, err := flow.Step("s", fn)
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if id == "" {
+		t.Error("expected non-empty step id")
+	}
+	entry, err := flow.getHandlerEntry(id)
+	if err != nil {
+		t.Fatalf("getHandlerEntry after Step: %v", err)
+	}
+	if entry.stepFn == nil {
+		t.Error("expected stepFn to be set for Step entry")
+	}
+	if entry.fn != nil {
+		t.Error("expected fn to be nil for Step entry")
+	}
+}
+
+func TestFlow_ProcessSequence_StepParamsPassed(t *testing.T) {
+	wf := NewWorkflow()
+	flow := wf.NewFlow("params").(*Flow)
+
+	var receivedParams FlowParams
+	idA, err := flow.Step("produce", func(ctx context.Context, t *Task, in FlowParams) (FlowParams, error) {
+		return FlowParams{"order_id": 42, "amount": 9.99}, nil
+	})
+	if err != nil {
+		t.Fatalf("Step(produce): %v", err)
+	}
+	idB, err := flow.Step("consume", func(ctx context.Context, t *Task, in FlowParams) (FlowParams, error) {
+		receivedParams = in
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("Step(consume): %v", err)
+	}
+	if err := flow.Edge("e", idA, idB); err != nil {
+		t.Fatalf("Edge: %v", err)
+	}
+
+	if err := flow.ProcessSequence(context.Background(), NewTask("x", nil)); err != nil {
+		t.Fatalf("ProcessSequence: %v", err)
+	}
+
+	if receivedParams["order_id"] != 42 {
+		t.Errorf("order_id = %v, want 42", receivedParams["order_id"])
+	}
+	if receivedParams["amount"] != 9.99 {
+		t.Errorf("amount = %v, want 9.99", receivedParams["amount"])
+	}
+}
+
+func TestFlow_ProcessSequence_StepParamsOverride(t *testing.T) {
+	wf := NewWorkflow()
+	flow := wf.NewFlow("override").(*Flow)
+
+	var finalParams FlowParams
+	idA, err := flow.Step("a", func(ctx context.Context, t *Task, in FlowParams) (FlowParams, error) {
+		return FlowParams{"key": "original", "extra": "keep"}, nil
+	})
+	if err != nil {
+		t.Fatalf("Step(a): %v", err)
+	}
+	idB, err := flow.Step("b", func(ctx context.Context, t *Task, in FlowParams) (FlowParams, error) {
+		out := FlowParams{}
+		maps.Copy(out, in)
+		out["key"] = "overridden"
+		return out, nil
+	})
+	if err != nil {
+		t.Fatalf("Step(b): %v", err)
+	}
+	idC, err := flow.Step("c", func(ctx context.Context, t *Task, in FlowParams) (FlowParams, error) {
+		finalParams = in
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("Step(c): %v", err)
+	}
+	if err := flow.Edge("e1", idA, idB); err != nil {
+		t.Fatalf("Edge(a,b): %v", err)
+	}
+	if err := flow.Edge("e2", idB, idC); err != nil {
+		t.Fatalf("Edge(b,c): %v", err)
+	}
+
+	if err := flow.ProcessSequence(context.Background(), NewTask("x", nil)); err != nil {
+		t.Fatalf("ProcessSequence: %v", err)
+	}
+
+	if finalParams["key"] != "overridden" {
+		t.Errorf("key = %v, want \"overridden\"", finalParams["key"])
+	}
+	if finalParams["extra"] != "keep" {
+		t.Errorf("extra = %v, want \"keep\"", finalParams["extra"])
+	}
+}
+
+func TestFlow_ProcessSequence_LegacyJobReceivesNoParams(t *testing.T) {
+	wf := NewWorkflow()
+	flow := wf.NewFlow("mixed").(*Flow)
+
+	var stepInParams FlowParams
+	idA, err := flow.Job("legacy", func(ctx context.Context, t *Task) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Job: %v", err)
+	}
+	idB, err := flow.Step("step", func(ctx context.Context, t *Task, in FlowParams) (FlowParams, error) {
+		stepInParams = in
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if err := flow.Edge("e", idA, idB); err != nil {
+		t.Fatalf("Edge: %v", err)
+	}
+
+	if err := flow.ProcessSequence(context.Background(), NewTask("x", nil)); err != nil {
+		t.Fatalf("ProcessSequence: %v", err)
+	}
+
+	// Legacy Job returns nil, so child Step receives an empty (not nil) FlowParams.
+	if stepInParams == nil {
+		t.Error("expected non-nil FlowParams, got nil")
+	}
+	if len(stepInParams) != 0 {
+		t.Errorf("expected empty FlowParams from legacy parent, got %v", stepInParams)
 	}
 }
 

@@ -27,11 +27,12 @@ var ErrHandlerNotFound = errors.New("handler not found for task")
 // "images:thumbnails" and the former will receive tasks with type name beginning
 // with "images".
 type ServeMux struct {
-	mu  sync.RWMutex
-	m   map[string]muxEntry
-	es  []muxEntry // slice of entries sorted from longest to shortest.
-	mws []MiddlewareFunc
-	wf  *Workflow
+	mu         sync.RWMutex
+	m          map[string]muxEntry
+	es         []muxEntry // slice of entries sorted from longest to shortest.
+	mws        []MiddlewareFunc
+	wf         *Workflow
+	stepRoutes map[string]StepFunc // handlers registered via HandleStep
 }
 
 type muxEntry struct {
@@ -56,19 +57,19 @@ func (mux *ServeMux) ProcessTask(ctx context.Context, task *Task) error {
 	return h.ProcessTask(ctx, task)
 }
 
-func (mux *ServeMux) UseWorkflow(wf *Workflow) {
+// UseWorkflow wires a Workflow into the mux. It validates that every handler
+// name referenced in the workflow's flow edges is registered before building
+// the DAG. Returns an error if any handler is missing.
+func (mux *ServeMux) UseWorkflow(wf *Workflow) error {
 	wf.RegisterRoutes(mux)
+	if err := wf.ValidateHandlers(); err != nil {
+		return err
+	}
 	wf.InitiateAllFlows()
-
-	flows := wf.GetAllFlows()
-	for _, flow := range flows {
+	for _, flow := range wf.GetAllFlows() {
 		mux.Handle(flow.GetName(), HandlerFunc(flow.ProcessSequence))
 	}
-	// for job, hdl := range mux.GetAllRoutes() {
-	// 	flow.Job(job, hdl.ProcessTask)
-	// }
-
-	// mux.Handle(flow.GetName(), HandlerFunc(flow.ProcessSequence))
+	return nil
 }
 
 // Handler returns the handler to use for the given task.
@@ -157,6 +158,45 @@ func (mux *ServeMux) HandleFunc(pattern string, handler func(context.Context, *T
 		panic("asynq: nil handler")
 	}
 	mux.Handle(pattern, HandlerFunc(handler))
+}
+
+// stepHandler wraps a StepFunc so it can be dispatched directly (outside a workflow)
+// with an empty FlowParams.
+type stepHandler struct {
+	fn StepFunc
+}
+
+func (s stepHandler) ProcessTask(ctx context.Context, t *Task) error {
+	_, err := s.fn(ctx, t, FlowParams{})
+	return err
+}
+
+// HandleStep registers a StepFunc for the given pattern. Inside a workflow, the step
+// receives merged output params from all parent steps and its own return value is
+// forwarded to child steps. When dispatched directly (outside a workflow), the step
+// receives an empty FlowParams.
+func (mux *ServeMux) HandleStep(pattern string, fn StepFunc) {
+	if fn == nil {
+		panic("asynq: nil handler")
+	}
+	mux.Handle(pattern, stepHandler{fn: fn})
+	mux.mu.Lock()
+	defer mux.mu.Unlock()
+	if mux.stepRoutes == nil {
+		mux.stepRoutes = make(map[string]StepFunc)
+	}
+	mux.stepRoutes[pattern] = fn
+}
+
+// GetAllStepRoutes returns a copy of the step routes registered via HandleStep.
+func (mux *ServeMux) GetAllStepRoutes() map[string]StepFunc {
+	mux.mu.RLock()
+	defer mux.mu.RUnlock()
+	routes := make(map[string]StepFunc, len(mux.stepRoutes))
+	for k, v := range mux.stepRoutes {
+		routes[k] = v
+	}
+	return routes
 }
 
 // Use appends a MiddlewareFunc to the chain.

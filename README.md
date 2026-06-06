@@ -263,6 +263,173 @@ func main() {
 }
 ```
 
+### Workflow: chaining tasks with parameter passing
+
+Use `HandleStep` instead of `HandleFunc` when a handler needs to receive output from its upstream step or pass data to the next one. Steps are wired together by `RegisterFlow` + `SetFlows` and executed in topological order.
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/suryatresna/asynq"
+)
+
+const redisAddr = "127.0.0.1:6379"
+
+func main() {
+    srv := asynq.NewServer(
+        asynq.RedisClientOpt{Addr: redisAddr},
+        asynq.Config{Concurrency: 10},
+    )
+
+    mux := asynq.NewServeMux()
+
+    // HandleStep — receives params from parent steps, returns params for child steps.
+    mux.HandleStep("jobA", func(ctx context.Context, t *asynq.Task, in asynq.FlowParams) (asynq.FlowParams, error) {
+        log.Printf("jobA running, input params: %v", in)
+        // Produce output that jobB will receive.
+        return asynq.FlowParams{"order_id": 42, "amount": 9.99}, nil
+    })
+
+    mux.HandleStep("jobB", func(ctx context.Context, t *asynq.Task, in asynq.FlowParams) (asynq.FlowParams, error) {
+        // Receive params produced by jobA.
+        orderID := in["order_id"]
+        amount  := in["amount"]
+        log.Printf("jobB processing order %v for amount %v", orderID, amount)
+        // Override or extend params for the next step.
+        return asynq.FlowParams{"order_id": orderID, "status": "processed"}, nil
+    })
+
+    // Define the flow: jobA → jobB
+    flow1 := asynq.RegisterFlow("flowA")
+    flow1.SetFlows("step1", "jobA", "jobB")
+
+    mux.UseWorkflow(asynq.NewWorkflow(flow1))
+
+    // Enqueue a "flowA" task to trigger the entire chain.
+    // client.Enqueue(asynq.NewTask("flowA", payload))
+
+    if err := srv.Run(mux); err != nil {
+        log.Fatalf("could not run server: %v", err)
+    }
+}
+```
+
+Steps registered with `HandleFunc` (legacy) also work in a workflow — they just don't receive or produce `FlowParams`.
+
+### Workflow: defining flows with Mermaid-like markdown
+
+Instead of calling `SetFlows` manually, you can describe the DAG in a Mermaid-like markdown string and pass it to `RegisterFlowMarkdown`.
+
+```go
+workflowMarkdown := `
+graph LR
+    ingest[Start Data Ingestion] --> clean(Clean Datasets)
+    ingest --> fetch(Fetch API Logs)
+    clean --> validate{Run Validations}
+    fetch --> validate
+    validate -->|Pass| load[Load to Data Warehouse]
+    validate -->|Fail| alert[Trigger Alert]
+`
+
+flow, err := asynq.RegisterFlowMarkdown("DataPipeline", workflowMarkdown)
+if err != nil {
+    log.Fatal(err)
+}
+
+mux := asynq.NewServeMux()
+mux.HandleStep("ingest",   handleIngest)
+mux.HandleStep("clean",    handleClean)
+mux.HandleStep("fetch",    handleFetch)
+mux.HandleStep("validate", handleValidate)
+mux.HandleStep("load",     handleLoad)
+mux.HandleStep("alert",    handleAlert)
+
+mux.UseWorkflow(asynq.NewWorkflow(flow))
+srv.Run(mux)
+```
+
+**Supported syntax**
+
+| Syntax | Meaning |
+|---|---|
+| `graph LR` | Required header; direction (`LR`, `TD`, `TB`, `RL`, `BT`) is cosmetic |
+| `A --> B` | Simple edge (label auto-generated as `A->B`) |
+| `A -->|label| B` | Edge with an explicit label |
+| `A[Display text]` | Rectangle node annotation (cosmetic only) |
+| `A(Display text)` | Rounded node annotation (cosmetic only) |
+| `A{Display text}` | Diamond node annotation (cosmetic only) |
+| `subgraph Name [...] … end` | Inline subflow (see below) |
+| `direction LR\|TD\|…` | Subgraph direction hint (cosmetic only) |
+| `%% comment` | Comment line (ignored) |
+
+Node IDs (`ingest`, `clean`, …) must match the handler names passed to `mux.HandleStep` / `mux.HandleFunc` exactly. Display annotations are discarded during wiring.
+
+### Workflow: subflows (nested flows)
+
+A `subgraph...end` block groups related steps into a named subflow. The subflow is expanded inline at parse time — all its nodes and edges become part of the parent DAG. This is purely syntactic sugar; no special execution machinery is needed.
+
+```go
+workflowMarkdown := `
+graph LR
+    %% Main pipeline
+    Ingest[ingest] --> Clean[clean]
+    Ingest --> Fetch[fetch]
+
+    Clean --> DataValidation
+    Fetch --> DataValidation
+
+    %% Inline subflow — groups validation steps visually and semantically
+    subgraph DataValidation [DataValidation]
+        direction LR
+        Validate[validate] --> Check[check]
+        Check --> Done[done]
+        Check --> Alert[alert]
+    end
+
+    %% Exit edges connect subflow terminal nodes back to the main pipeline
+    Done --> Load[load]
+    Alert --> Load
+`
+
+flow, err := asynq.RegisterFlowMarkdown("DataPipeline", workflowMarkdown)
+if err != nil {
+    log.Fatal(err)
+}
+
+mux := asynq.NewServeMux()
+mux.HandleStep("Ingest",   handleIngest)
+mux.HandleStep("Clean",    handleClean)
+mux.HandleStep("Fetch",    handleFetch)
+mux.HandleStep("Validate", handleValidate)
+mux.HandleStep("Check",    handleCheck)
+mux.HandleStep("Done",     handleDone)
+mux.HandleStep("Alert",    handleAlert)
+mux.HandleStep("Load",     handleLoad)
+
+mux.UseWorkflow(asynq.NewWorkflow(flow))
+srv.Run(mux)
+```
+
+The parser expands the subgraph reference automatically:
+
+- `Clean --> DataValidation` and `Fetch --> DataValidation` are rewritten to target the subgraph's **entry node** (`Validate` — the node with no incoming edges within the subgraph).
+- Internal edges (`Validate → Check → Done`, `Check → Alert`) are flattened into the parent DAG.
+- Exit edges (`Done --> Load`, `Alert --> Load`) are written explicitly in the parent graph.
+
+**Subflow rules**
+
+| Rule | Detail |
+|---|---|
+| Entry node | The subgraph node(s) with no incoming edges *within* the subgraph |
+| Exit edges | Written explicitly as parent-level edges after the `end` keyword |
+| `direction` | Cosmetic only; ignored during wiring |
+| Nesting | Multiple `subgraph` blocks are supported in one `graph` |
+| Unclosed block | A `subgraph` without a matching `end` returns a parse error |
+
 For a more detailed walk-through of the library, see our [Getting Started](https://github.com/suryatresna/asynq/wiki/Getting-Started) guide.
 
 To learn more about `asynq` features and APIs, see the package [godoc](https://godoc.org/github.com/suryatresna/asynq).

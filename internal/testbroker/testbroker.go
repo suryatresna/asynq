@@ -226,6 +226,24 @@ func (tb *TestBroker) WriteResult(qname, id string, data []byte) (int, error) {
 	return tb.real.WriteResult(qname, id, data)
 }
 
+func (tb *TestBroker) SetTaskState(qname, id, message string) error {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return errRedisDown
+	}
+	return tb.real.SetTaskState(qname, id, message)
+}
+
+func (tb *TestBroker) TaskStatePubSub(qname, id string) (*redis.PubSub, error) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.sleeping {
+		return nil, errRedisDown
+	}
+	return tb.real.TaskStatePubSub(qname, id)
+}
+
 func (tb *TestBroker) Ping() error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()

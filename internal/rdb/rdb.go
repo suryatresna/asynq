@@ -1669,3 +1669,41 @@ func (r *RDB) WriteResult(qname, taskID string, data []byte) (int, error) {
 	}
 	return len(data), nil
 }
+
+// SetTaskState stores the latest state message for the specified task on the
+// task hash (overwriting any previous value) and publishes the change on the
+// task's state channel for live monitoring.
+func (r *RDB) SetTaskState(qname, taskID, message string) error {
+	var op errors.Op = "rdb.SetTaskState"
+	ctx := context.Background()
+	now := r.clock.Now().Unix()
+	payload, err := base.EncodeTaskStateUpdate(&base.TaskStateUpdate{
+		TaskID:    taskID,
+		Queue:     qname,
+		Message:   message,
+		UpdatedAt: now,
+	})
+	if err != nil {
+		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode task state update: %v", err))
+	}
+	pipe := r.client.Pipeline()
+	pipe.HSet(ctx, base.TaskKey(qname, taskID), "state_msg", message, "state_at", now)
+	pipe.Publish(ctx, base.TaskStateChannel(qname, taskID), payload)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return errors.E(op, errors.Unknown, &errors.RedisCommandError{Command: "set_task_state", Err: err})
+	}
+	return nil
+}
+
+// TaskStatePubSub returns a pub/sub subscribed to the given task's state channel.
+// The caller is responsible for closing the returned pub/sub.
+func (r *RDB) TaskStatePubSub(qname, taskID string) (*redis.PubSub, error) {
+	var op errors.Op = "rdb.TaskStatePubSub"
+	ctx := context.Background()
+	pubsub := r.client.Subscribe(ctx, base.TaskStateChannel(qname, taskID))
+	if _, err := pubsub.Receive(ctx); err != nil {
+		pubsub.Close()
+		return nil, errors.E(op, errors.Unknown, fmt.Sprintf("redis pubsub receive error: %v", err))
+	}
+	return pubsub, nil
+}

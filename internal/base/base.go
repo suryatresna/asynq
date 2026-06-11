@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -196,6 +197,13 @@ func SchedulerHistoryKey(entryID string) string {
 	return "asynq:scheduler_history:" + entryID
 }
 
+// TaskStateChannel returns the redis pub/sub channel name used to publish live
+// state updates for the given task. Each task has its own channel so consumers
+// can subscribe to exactly the task they want to monitor.
+func TaskStateChannel(qname, id string) string {
+	return "asynq:taskstate:" + qname + ":" + id
+}
+
 // UniqueKey returns a redis key with the given type, payload, and queue name.
 func UniqueKey(qname, tasktype string, payload []byte) string {
 	if payload == nil {
@@ -354,12 +362,46 @@ type TaskInfo struct {
 	State         TaskState
 	NextProcessAt time.Time
 	Result        []byte
+
+	// StateMessage holds the latest human-readable state set by the handler via
+	// Task.SetState while the task is being processed. Empty if never set.
+	StateMessage string
+
+	// StateUpdatedAt is the time the StateMessage was last set, in Unix seconds.
+	// Zero if StateMessage was never set.
+	StateUpdatedAt int64
 }
 
 // Z represents sorted set member.
 type Z struct {
 	Message *TaskMessage
 	Score   int64
+}
+
+// TaskStateUpdate is the payload published on a task's state channel whenever
+// the handler reports a new state via Task.SetState.
+type TaskStateUpdate struct {
+	TaskID    string `json:"task_id"`
+	Queue     string `json:"queue"`
+	Message   string `json:"message"`
+	UpdatedAt int64  `json:"updated_at"` // Unix time in seconds.
+}
+
+// EncodeTaskStateUpdate marshals the given update and returns the encoded bytes.
+func EncodeTaskStateUpdate(u *TaskStateUpdate) ([]byte, error) {
+	if u == nil {
+		return nil, fmt.Errorf("cannot encode nil task state update")
+	}
+	return json.Marshal(u)
+}
+
+// DecodeTaskStateUpdate unmarshals the given bytes into a TaskStateUpdate.
+func DecodeTaskStateUpdate(b []byte) (*TaskStateUpdate, error) {
+	var u TaskStateUpdate
+	if err := json.Unmarshal(b, &u); err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
 
 // ServerInfo holds information about a running server.
@@ -741,4 +783,11 @@ type Broker interface {
 	PublishCancelation(id string) error
 
 	WriteResult(qname, id string, data []byte) (n int, err error)
+
+	// Task state (live progress) related methods.
+	// SetTaskState stores the latest state message for the task and publishes the
+	// change on the task's state channel.
+	SetTaskState(qname, id, message string) error
+	// TaskStatePubSub returns a pub/sub subscribed to the given task's state channel.
+	TaskStatePubSub(qname, id string) (*redis.PubSub, error) // TODO: Need to decouple from redis to support other brokers
 }

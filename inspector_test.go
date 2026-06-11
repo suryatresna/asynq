@@ -477,7 +477,7 @@ func TestInspectorHistory(t *testing.T) {
 }
 
 func createPendingTask(msg *base.TaskMessage) *TaskInfo {
-	return newTaskInfo(msg, base.TaskStatePending, time.Now(), nil)
+	return newTaskInfo(msg, base.TaskStatePending, time.Now(), nil, "", 0)
 }
 
 func TestInspectorGetTaskInfo(t *testing.T) {
@@ -543,6 +543,8 @@ func TestInspectorGetTaskInfo(t *testing.T) {
 				base.TaskStateActive,
 				time.Time{}, // zero value for n/a
 				nil,
+				"",
+				0,
 			),
 		},
 		{
@@ -553,6 +555,8 @@ func TestInspectorGetTaskInfo(t *testing.T) {
 				base.TaskStateScheduled,
 				fiveMinsFromNow,
 				nil,
+				"",
+				0,
 			),
 		},
 		{
@@ -563,6 +567,8 @@ func TestInspectorGetTaskInfo(t *testing.T) {
 				base.TaskStateRetry,
 				oneHourFromNow,
 				nil,
+				"",
+				0,
 			),
 		},
 		{
@@ -573,6 +579,8 @@ func TestInspectorGetTaskInfo(t *testing.T) {
 				base.TaskStateArchived,
 				time.Time{}, // zero value for n/a
 				nil,
+				"",
+				0,
 			),
 		},
 		{
@@ -583,6 +591,8 @@ func TestInspectorGetTaskInfo(t *testing.T) {
 				base.TaskStatePending,
 				now,
 				nil,
+				"",
+				0,
 			),
 		},
 	}
@@ -757,7 +767,7 @@ func TestInspectorListPendingTasks(t *testing.T) {
 }
 
 func newOrphanedTaskInfo(msg *base.TaskMessage) *TaskInfo {
-	info := newTaskInfo(msg, base.TaskStateActive, time.Time{}, nil)
+	info := newTaskInfo(msg, base.TaskStateActive, time.Time{}, nil, "", 0)
 	info.IsOrphaned = true
 	return info
 }
@@ -798,8 +808,8 @@ func TestInspectorListActiveTasks(t *testing.T) {
 			},
 			qname: "custom",
 			want: []*TaskInfo{
-				newTaskInfo(m3, base.TaskStateActive, time.Time{}, nil),
-				newTaskInfo(m4, base.TaskStateActive, time.Time{}, nil),
+				newTaskInfo(m3, base.TaskStateActive, time.Time{}, nil, "", 0),
+				newTaskInfo(m4, base.TaskStateActive, time.Time{}, nil, "", 0),
 			},
 		},
 		{
@@ -820,7 +830,7 @@ func TestInspectorListActiveTasks(t *testing.T) {
 			},
 			qname: "default",
 			want: []*TaskInfo{
-				newTaskInfo(m1, base.TaskStateActive, time.Time{}, nil),
+				newTaskInfo(m1, base.TaskStateActive, time.Time{}, nil, "", 0),
 				newOrphanedTaskInfo(m2),
 			},
 		},
@@ -849,6 +859,8 @@ func createScheduledTask(z base.Z) *TaskInfo {
 		base.TaskStateScheduled,
 		time.Unix(z.Score, 0),
 		nil,
+		"",
+		0,
 	)
 }
 
@@ -919,6 +931,8 @@ func createRetryTask(z base.Z) *TaskInfo {
 		base.TaskStateRetry,
 		time.Unix(z.Score, 0),
 		nil,
+		"",
+		0,
 	)
 }
 
@@ -990,6 +1004,8 @@ func createArchivedTask(z base.Z) *TaskInfo {
 		base.TaskStateArchived,
 		time.Time{}, // zero value for n/a
 		nil,
+		"",
+		0,
 	)
 }
 
@@ -1067,6 +1083,8 @@ func createCompletedTask(z base.Z) *TaskInfo {
 		base.TaskStateCompleted,
 		time.Time{}, // zero value for n/a
 		nil,         // TODO: Test with result data
+		"",
+		0,
 	)
 }
 
@@ -1228,7 +1246,7 @@ func TestInspectorListAggregatingTasks(t *testing.T) {
 }
 
 func createAggregatingTaskInfo(msg *base.TaskMessage) *TaskInfo {
-	return newTaskInfo(msg, base.TaskStateAggregating, time.Time{}, nil)
+	return newTaskInfo(msg, base.TaskStateAggregating, time.Time{}, nil, "", 0)
 }
 
 func TestInspectorListPagination(t *testing.T) {
@@ -3682,5 +3700,55 @@ func TestInspectorGroups(t *testing.T) {
 				t.Errorf("Groups = %v, want %v; (-want,+got)\n%s", got, tc.want, diff)
 			}
 		})
+	}
+}
+
+func TestInspectorSubscribeTaskState(t *testing.T) {
+	r := setup(t)
+	rdbClient := rdb.NewRDB(r)
+	inspector := NewInspector(getRedisConnOpt(t))
+	defer inspector.Close()
+
+	m1 := h.NewTaskMessageWithQueue("task1", nil, "default")
+	h.SeedAllActiveQueues(t, r, map[string][]*base.TaskMessage{
+		"default": {m1},
+	})
+
+	sub, err := inspector.SubscribeTaskState(m1.Queue, m1.ID)
+	if err != nil {
+		t.Fatalf("SubscribeTaskState returned error: %v", err)
+	}
+	defer sub.Close()
+
+	const message = "in process"
+	if err := rdbClient.SetTaskState(m1.Queue, m1.ID, message); err != nil {
+		t.Fatalf("SetTaskState returned error: %v", err)
+	}
+
+	select {
+	case update := <-sub.Channel():
+		if update.Message != message {
+			t.Errorf("received Message=%q, want %q", update.Message, message)
+		}
+		if update.TaskID != m1.ID {
+			t.Errorf("received TaskID=%q, want %q", update.TaskID, m1.ID)
+		}
+		if update.Queue != m1.Queue {
+			t.Errorf("received Queue=%q, want %q", update.Queue, m1.Queue)
+		}
+		if update.UpdatedAt.IsZero() {
+			t.Errorf("received UpdatedAt is zero, want non-zero")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for task state update")
+	}
+}
+
+func TestTaskSetStateWithoutWriter(t *testing.T) {
+	// SetState on a task created via NewTask (no ResultWriter) must return an error
+	// rather than panic.
+	task := NewTask("some:task", nil)
+	if err := task.SetState("starting"); err == nil {
+		t.Error("Task.SetState on a task without a ResultWriter returned nil error, want non-nil")
 	}
 }

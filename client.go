@@ -453,7 +453,7 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 	case err != nil:
 		return nil, err
 	}
-	return newTaskInfo(msg, state, opt.processAt, nil), nil
+	return newTaskInfo(msg, state, opt.processAt, nil, "", 0), nil
 }
 
 // BatchEnqueueResult holds the result of enqueuing a single task within a batch.
@@ -586,7 +586,7 @@ func (c *Client) BatchEnqueueContext(ctx context.Context, tasks []*Task, opts ..
 	}
 
 	for j, idx := range itemIndexes {
-		info := newTaskInfo(items[j].Msg, itemMetas[j].state, itemMetas[j].processAt, nil)
+		info := newTaskInfo(items[j].Msg, itemMetas[j].state, itemMetas[j].processAt, nil, "", 0)
 		results[idx] = BatchEnqueueResult{TaskInfo: info}
 	}
 	return results

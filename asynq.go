@@ -48,6 +48,28 @@ func (t *Task) Options() []Option          { return t.opts }
 // Only the tasks passed to Handler.ProcessTask have a valid ResultWriter pointer.
 func (t *Task) ResultWriter() *ResultWriter { return t.w }
 
+// SetState records a human-readable state message for the task while it is being
+// processed. Each call overwrites the previous state (only the latest is retained)
+// and publishes the change so it can be monitored live via
+// Inspector.SubscribeTaskState. The latest state is also available through
+// Inspector.GetTaskInfo as TaskInfo.StateMessage.
+//
+// SetState may only be called on a task passed to Handler.ProcessTask. It returns
+// a non-nil error if called on a task created with NewTask, or if the task's
+// context has already been canceled. The returned error can be safely ignored by
+// callers that treat state reporting as best-effort.
+func (t *Task) SetState(message string) error {
+	if t.w == nil {
+		return fmt.Errorf("asynq: SetState can only be called on a task being processed")
+	}
+	select {
+	case <-t.w.ctx.Done():
+		return fmt.Errorf("asynq: failed to set task state: %w", t.w.ctx.Err())
+	default:
+	}
+	return t.w.broker.SetTaskState(t.w.qname, t.w.id, message)
+}
+
 // NewTask returns a new Task given a type name and payload data.
 // Options can be passed to configure task processing behavior.
 func NewTask(typename string, payload []byte, opts ...Option) *Task {
@@ -153,6 +175,15 @@ type TaskInfo struct {
 	// Result holds the result data associated with the task.
 	// Use ResultWriter to write result data from the Handler.
 	Result []byte
+
+	// StateMessage holds the latest state message reported by the handler via
+	// Task.SetState while the task was being processed.
+	// Empty string indicates no state message was set.
+	StateMessage string
+
+	// StateUpdatedAt is the time the StateMessage was last set.
+	// Zero value (i.e. time.Time{}) indicates no value.
+	StateUpdatedAt time.Time
 }
 
 // If t is non-zero, returns time converted from t as unix time in seconds.
@@ -164,24 +195,26 @@ func fromUnixTimeOrZero(t int64) time.Time {
 	return time.Unix(t, 0)
 }
 
-func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time.Time, result []byte) *TaskInfo {
+func newTaskInfo(msg *base.TaskMessage, state base.TaskState, nextProcessAt time.Time, result []byte, stateMessage string, stateUpdatedAt int64) *TaskInfo {
 	info := TaskInfo{
-		ID:            msg.ID,
-		Queue:         msg.Queue,
-		Type:          msg.Type,
-		Payload:       msg.Payload, // Do we need to make a copy?
-		Headers:       msg.Headers,
-		MaxRetry:      msg.Retry,
-		Retried:       msg.Retried,
-		LastErr:       msg.ErrorMsg,
-		Group:         msg.GroupKey,
-		Timeout:       time.Duration(msg.Timeout) * time.Second,
-		Deadline:      fromUnixTimeOrZero(msg.Deadline),
-		Retention:     time.Duration(msg.Retention) * time.Second,
-		NextProcessAt: nextProcessAt,
-		LastFailedAt:  fromUnixTimeOrZero(msg.LastFailedAt),
-		CompletedAt:   fromUnixTimeOrZero(msg.CompletedAt),
-		Result:        result,
+		ID:             msg.ID,
+		Queue:          msg.Queue,
+		Type:           msg.Type,
+		Payload:        msg.Payload, // Do we need to make a copy?
+		Headers:        msg.Headers,
+		MaxRetry:       msg.Retry,
+		Retried:        msg.Retried,
+		LastErr:        msg.ErrorMsg,
+		Group:          msg.GroupKey,
+		Timeout:        time.Duration(msg.Timeout) * time.Second,
+		Deadline:       fromUnixTimeOrZero(msg.Deadline),
+		Retention:      time.Duration(msg.Retention) * time.Second,
+		NextProcessAt:  nextProcessAt,
+		LastFailedAt:   fromUnixTimeOrZero(msg.LastFailedAt),
+		CompletedAt:    fromUnixTimeOrZero(msg.CompletedAt),
+		Result:         result,
+		StateMessage:   stateMessage,
+		StateUpdatedAt: fromUnixTimeOrZero(stateUpdatedAt),
 	}
 
 	switch state {

@@ -468,25 +468,27 @@ func (r *RDB) checkQueueExists(qname string) error {
 // ARGV[3] -> queue key prefix (asynq:{<qname>}:)
 //
 // Output:
-// Tuple of {msg, state, nextProcessAt, result}
+// Tuple of {msg, state, nextProcessAt, result, state_msg, state_at}
 // msg: encoded task message
 // state: string describing the state of the task
 // nextProcessAt: unix time in seconds, zero if not applicable.
 // result: result data associated with the task
+// state_msg: latest state message set by the handler via Task.SetState
+// state_at: unix time in seconds when state_msg was last set, zero if never set
 //
 // If the task key doesn't exist, it returns error with a message "NOT FOUND"
 var getTaskInfoCmd = redis.NewScript(`
 	if redis.call("EXISTS", KEYS[1]) == 0 then
 		return redis.error_reply("NOT FOUND")
 	end
-	local msg, state, result = unpack(redis.call("HMGET", KEYS[1], "msg", "state", "result"))
+	local msg, state, result, state_msg, state_at = unpack(redis.call("HMGET", KEYS[1], "msg", "state", "result", "state_msg", "state_at"))
 	if state == "scheduled" or state == "retry" then
-		return {msg, state, redis.call("ZSCORE", ARGV[3] .. state, ARGV[1]), result}
+		return {msg, state, redis.call("ZSCORE", ARGV[3] .. state, ARGV[1]), result, state_msg, state_at}
 	end
 	if state == "pending" then
-		return {msg, state, ARGV[2], result}
+		return {msg, state, ARGV[2], result, state_msg, state_at}
 	end
-	return {msg, state, 0, result}
+	return {msg, state, 0, result, state_msg, state_at}
 `)
 
 // GetTaskInfo returns a TaskInfo describing the task from the given queue.
@@ -512,7 +514,7 @@ func (r *RDB) GetTaskInfo(qname, id string) (*base.TaskInfo, error) {
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, "unexpected value returned from Lua script")
 	}
-	if len(vals) != 4 {
+	if len(vals) != 6 {
 		return nil, errors.E(op, errors.Internal, "unepxected number of values returned from Lua script")
 	}
 	encoded, err := cast.ToStringE(vals[0])
@@ -528,6 +530,14 @@ func (r *RDB) GetTaskInfo(qname, id string) (*base.TaskInfo, error) {
 		return nil, errors.E(op, errors.Internal, "unexpected value returned from Lua script")
 	}
 	resultStr, err := cast.ToStringE(vals[3])
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, "unexpected value returned from Lua script")
+	}
+	stateMsg, err := cast.ToStringE(vals[4])
+	if err != nil {
+		return nil, errors.E(op, errors.Internal, "unexpected value returned from Lua script")
+	}
+	stateAt, err := cast.ToInt64E(vals[5])
 	if err != nil {
 		return nil, errors.E(op, errors.Internal, "unexpected value returned from Lua script")
 	}
@@ -548,10 +558,12 @@ func (r *RDB) GetTaskInfo(qname, id string) (*base.TaskInfo, error) {
 		result = []byte(resultStr)
 	}
 	return &base.TaskInfo{
-		Message:       msg,
-		State:         state,
-		NextProcessAt: nextProcessAt,
-		Result:        result,
+		Message:        msg,
+		State:          state,
+		NextProcessAt:  nextProcessAt,
+		Result:         result,
+		StateMessage:   stateMsg,
+		StateUpdatedAt: stateAt,
 	}, nil
 }
 
@@ -666,9 +678,11 @@ local ids = redis.call("LRange", KEYS[1], ARGV[1], ARGV[2])
 local data = {}
 for _, id in ipairs(ids) do
 	local key = ARGV[3] .. id
-	local msg, result = unpack(redis.call("HMGET", key, "msg","result"))
+	local msg, result, state_msg, state_at = unpack(redis.call("HMGET", key, "msg","result","state_msg","state_at"))
 	table.insert(data, msg)
 	table.insert(data, result)
+	table.insert(data, state_msg)
+	table.insert(data, state_at)
 end
 return data
 `)
@@ -698,7 +712,7 @@ func (r *RDB) listMessages(qname string, state base.TaskState, pgn Pagination) (
 		return nil, errors.E(errors.Internal, fmt.Errorf("cast error: Lua script returned unexpected value: %v", res))
 	}
 	var infos []*base.TaskInfo
-	for i := 0; i < len(data); i += 2 {
+	for i := 0; i < len(data); i += 4 {
 		m, err := base.DecodeMessage([]byte(data[i]))
 		if err != nil {
 			continue // bad data, ignore and continue
@@ -707,15 +721,22 @@ func (r *RDB) listMessages(qname string, state base.TaskState, pgn Pagination) (
 		if len(data[i+1]) > 0 {
 			res = []byte(data[i+1])
 		}
+		stateMsg := data[i+2]
+		var stateAt int64
+		if len(data[i+3]) > 0 {
+			stateAt = cast.ToInt64(data[i+3])
+		}
 		var nextProcessAt time.Time
 		if state == base.TaskStatePending {
 			nextProcessAt = r.clock.Now()
 		}
 		infos = append(infos, &base.TaskInfo{
-			Message:       m,
-			State:         state,
-			NextProcessAt: nextProcessAt,
-			Result:        res,
+			Message:        m,
+			State:          state,
+			NextProcessAt:  nextProcessAt,
+			Result:         res,
+			StateMessage:   stateMsg,
+			StateUpdatedAt: stateAt,
 		})
 	}
 	reverse(infos)

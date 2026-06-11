@@ -3483,6 +3483,96 @@ func TestWriteResult(t *testing.T) {
 	}
 }
 
+func TestSetTaskState(t *testing.T) {
+	r := setup(t)
+	defer r.Close()
+
+	m1 := h.NewTaskMessageWithQueue("task1", nil, "default")
+
+	h.FlushDB(t, r.client)
+	h.SeedAllActiveQueues(t, r.client, map[string][]*base.TaskMessage{
+		"default": {m1},
+	})
+
+	const message = "processing step 1"
+	if err := r.SetTaskState(m1.Queue, m1.ID, message); err != nil {
+		t.Fatalf("SetTaskState failed: %v", err)
+	}
+
+	// The latest state snapshot should be stored on the task hash.
+	taskKey := base.TaskKey(m1.Queue, m1.ID)
+	if got := r.client.HGet(context.Background(), taskKey, "state_msg").Val(); got != message {
+		t.Errorf("`state_msg` field under %q is %q, want %q", taskKey, got, message)
+	}
+	if got := r.client.HGet(context.Background(), taskKey, "state_at").Val(); got == "" {
+		t.Errorf("`state_at` field under %q is empty, want a unix timestamp", taskKey)
+	}
+
+	// GetTaskInfo should surface the snapshot.
+	info, err := r.GetTaskInfo(m1.Queue, m1.ID)
+	if err != nil {
+		t.Fatalf("GetTaskInfo failed: %v", err)
+	}
+	if info.StateMessage != message {
+		t.Errorf("GetTaskInfo returned StateMessage=%q, want %q", info.StateMessage, message)
+	}
+	if info.StateUpdatedAt == 0 {
+		t.Errorf("GetTaskInfo returned StateUpdatedAt=0, want a unix timestamp")
+	}
+
+	// A later call should overwrite the previous snapshot (latest wins).
+	const message2 = "processing step 2"
+	if err := r.SetTaskState(m1.Queue, m1.ID, message2); err != nil {
+		t.Fatalf("SetTaskState failed: %v", err)
+	}
+	info, err = r.GetTaskInfo(m1.Queue, m1.ID)
+	if err != nil {
+		t.Fatalf("GetTaskInfo failed: %v", err)
+	}
+	if info.StateMessage != message2 {
+		t.Errorf("after overwrite, GetTaskInfo returned StateMessage=%q, want %q", info.StateMessage, message2)
+	}
+}
+
+func TestSetTaskStatePublishes(t *testing.T) {
+	r := setup(t)
+	defer r.Close()
+
+	m1 := h.NewTaskMessageWithQueue("task1", nil, "default")
+	h.FlushDB(t, r.client)
+	h.SeedAllActiveQueues(t, r.client, map[string][]*base.TaskMessage{
+		"default": {m1},
+	})
+
+	pubsub, err := r.TaskStatePubSub(m1.Queue, m1.ID)
+	if err != nil {
+		t.Fatalf("TaskStatePubSub failed: %v", err)
+	}
+	defer pubsub.Close()
+	ch := pubsub.Channel()
+
+	const message = "live update"
+	if err := r.SetTaskState(m1.Queue, m1.ID, message); err != nil {
+		t.Fatalf("SetTaskState failed: %v", err)
+	}
+
+	select {
+	case msg := <-ch:
+		u, err := base.DecodeTaskStateUpdate([]byte(msg.Payload))
+		if err != nil {
+			t.Fatalf("DecodeTaskStateUpdate failed: %v", err)
+		}
+		if u.Message != message {
+			t.Errorf("received message=%q, want %q", u.Message, message)
+		}
+		if u.TaskID != m1.ID || u.Queue != m1.Queue {
+			t.Errorf("received update for task %s/%s, want %s/%s", u.Queue, u.TaskID, m1.Queue, m1.ID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for task state update")
+	}
+}
+
 func TestAggregationCheck(t *testing.T) {
 	r := setup(t)
 	defer r.Close()

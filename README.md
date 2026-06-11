@@ -35,6 +35,7 @@ Task queues are used as a mechanism to distribute work across multiple machines.
 - Allow [timeout and deadline per task](https://github.com/suryatresna/asynq/wiki/Task-Timeout-and-Cancelation)
 - Allow [aggregating group of tasks](https://github.com/suryatresna/asynq/wiki/Task-aggregation) to batch multiple successive operations
 - [Flexible handler interface with support for middlewares](https://github.com/suryatresna/asynq/wiki/Handler-Deep-Dive)
+- [Live task state](#task-state-live-progress) for handlers to report progress and consumers to monitor running tasks
 - [Ability to pause queue](/tools/asynq/README.md#pause) to stop processing tasks from the queue
 - [Periodic Tasks](https://github.com/suryatresna/asynq/wiki/Periodic-Tasks)
 - [Support Redis Sentinels](https://github.com/suryatresna/asynq/wiki/Automatic-Failover) for high availability
@@ -433,6 +434,42 @@ The parser expands the subgraph reference automatically:
 For a more detailed walk-through of the library, see our [Getting Started](https://github.com/suryatresna/asynq/wiki/Getting-Started) guide.
 
 To learn more about `asynq` features and APIs, see the package [godoc](https://godoc.org/github.com/suryatresna/asynq).
+
+## Task state (live progress)
+
+A handler can report a human-readable state message while a task is running using
+`Task.SetState`. Each call overwrites the previous message (only the latest snapshot
+is kept) and publishes the change so it can be monitored live.
+
+```go
+func processTask(ctx context.Context, t *asynq.Task) error {
+    t.SetState("Task sample is starting")
+    // ... do work ...
+    t.SetState("Task sample is in process")
+    // ... do work ...
+    t.SetState("Task is complete")
+    return nil
+}
+```
+
+Consumers monitor a task in two ways:
+
+```go
+inspector := asynq.NewInspector(asynq.RedisClientOpt{Addr: ":6379"})
+
+// 1. Poll the latest snapshot.
+info, _ := inspector.GetTaskInfo("default", taskID)
+fmt.Println(info.StateMessage, info.StateUpdatedAt)
+
+// 2. Subscribe for live updates as they happen.
+sub, _ := inspector.SubscribeTaskState("default", taskID)
+defer sub.Close()
+for update := range sub.Channel() {
+    fmt.Printf("%q at %s\n", update.Message, update.UpdatedAt)
+}
+```
+
+See [examples/state](/examples/state/main.go) for a complete runnable example.
 
 ## Web UI
 

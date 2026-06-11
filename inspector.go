@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -248,7 +249,7 @@ func (i *Inspector) GetTaskInfo(queue, id string) (*TaskInfo, error) {
 	case err != nil:
 		return nil, fmt.Errorf("asynq: %w", err)
 	}
-	return newTaskInfo(info.Message, info.State, info.NextProcessAt, info.Result), nil
+	return newTaskInfo(info.Message, info.State, info.NextProcessAt, info.Result, info.StateMessage, info.StateUpdatedAt), nil
 }
 
 // ListOption specifies behavior of list operation.
@@ -335,6 +336,8 @@ func (i *Inspector) ListPendingTasks(queue string, opts ...ListOption) ([]*TaskI
 			i.State,
 			i.NextProcessAt,
 			i.Result,
+			i.StateMessage,
+			i.StateUpdatedAt,
 		))
 	}
 	return tasks, err
@@ -371,6 +374,8 @@ func (i *Inspector) ListActiveTasks(queue string, opts ...ListOption) ([]*TaskIn
 			i.State,
 			i.NextProcessAt,
 			i.Result,
+			i.StateMessage,
+			i.StateUpdatedAt,
 		)
 		if _, ok := expiredSet[i.Message.ID]; ok {
 			t.IsOrphaned = true
@@ -403,6 +408,8 @@ func (i *Inspector) ListAggregatingTasks(queue, group string, opts ...ListOption
 			i.State,
 			i.NextProcessAt,
 			i.Result,
+			i.StateMessage,
+			i.StateUpdatedAt,
 		))
 	}
 	return tasks, nil
@@ -432,6 +439,8 @@ func (i *Inspector) ListScheduledTasks(queue string, opts ...ListOption) ([]*Tas
 			i.State,
 			i.NextProcessAt,
 			i.Result,
+			i.StateMessage,
+			i.StateUpdatedAt,
 		))
 	}
 	return tasks, nil
@@ -461,6 +470,8 @@ func (i *Inspector) ListRetryTasks(queue string, opts ...ListOption) ([]*TaskInf
 			i.State,
 			i.NextProcessAt,
 			i.Result,
+			i.StateMessage,
+			i.StateUpdatedAt,
 		))
 	}
 	return tasks, nil
@@ -490,6 +501,8 @@ func (i *Inspector) ListArchivedTasks(queue string, opts ...ListOption) ([]*Task
 			i.State,
 			i.NextProcessAt,
 			i.Result,
+			i.StateMessage,
+			i.StateUpdatedAt,
 		))
 	}
 	return tasks, nil
@@ -519,6 +532,8 @@ func (i *Inspector) ListCompletedTasks(queue string, opts ...ListOption) ([]*Tas
 			i.State,
 			i.NextProcessAt,
 			i.Result,
+			i.StateMessage,
+			i.StateUpdatedAt,
 		))
 	}
 	return tasks, nil
@@ -764,6 +779,102 @@ func (i *Inspector) ArchiveTask(queue, id string) error {
 // value only indicates whether the cancelation signal has been sent.
 func (i *Inspector) CancelProcessing(id string) error {
 	return i.rdb.PublishCancelation(id)
+}
+
+// TaskStateUpdate represents a single live state update reported by a handler
+// via Task.SetState.
+type TaskStateUpdate struct {
+	// TaskID is the ID of the task that reported the state.
+	TaskID string
+
+	// Queue is the name of the queue the task belongs to.
+	Queue string
+
+	// Message is the human-readable state message reported by the handler.
+	Message string
+
+	// UpdatedAt is the time the state was reported.
+	UpdatedAt time.Time
+}
+
+// TaskStateSubscription is a subscription to a task's live state updates.
+// Receive updates from Channel and call Close when done to release resources.
+type TaskStateSubscription struct {
+	pubsub    *redis.PubSub
+	ch        chan *TaskStateUpdate
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// SubscribeTaskState subscribes to live state updates published by a task as it
+// is processed (see Task.SetState). It returns a TaskStateSubscription from which
+// updates can be received. The caller must call Close on the returned subscription
+// when done.
+//
+// Note: only updates published after the subscription is established are received.
+// Use GetTaskInfo to read the latest state snapshot for an already-running task.
+func (i *Inspector) SubscribeTaskState(queue, id string) (*TaskStateSubscription, error) {
+	if err := base.ValidateQueueName(queue); err != nil {
+		return nil, fmt.Errorf("asynq: %w", err)
+	}
+	pubsub, err := i.rdb.TaskStatePubSub(queue, id)
+	if err != nil {
+		return nil, fmt.Errorf("asynq: %w", err)
+	}
+	sub := &TaskStateSubscription{
+		pubsub: pubsub,
+		ch:     make(chan *TaskStateUpdate),
+		done:   make(chan struct{}),
+	}
+	go sub.run()
+	return sub, nil
+}
+
+// run forwards decoded updates from the underlying redis pub/sub to the
+// subscription's channel until the subscription is closed.
+func (s *TaskStateSubscription) run() {
+	redisCh := s.pubsub.Channel()
+	for {
+		select {
+		case <-s.done:
+			return
+		case msg, ok := <-redisCh:
+			if !ok {
+				return
+			}
+			u, err := base.DecodeTaskStateUpdate([]byte(msg.Payload))
+			if err != nil {
+				continue // ignore malformed payloads
+			}
+			update := &TaskStateUpdate{
+				TaskID:    u.TaskID,
+				Queue:     u.Queue,
+				Message:   u.Message,
+				UpdatedAt: fromUnixTimeOrZero(u.UpdatedAt),
+			}
+			select {
+			case s.ch <- update:
+			case <-s.done:
+				return
+			}
+		}
+	}
+}
+
+// Channel returns the channel on which live task state updates are delivered.
+func (s *TaskStateSubscription) Channel() <-chan *TaskStateUpdate {
+	return s.ch
+}
+
+// Close stops the subscription and releases the underlying redis resources.
+// It is safe to call Close multiple times.
+func (s *TaskStateSubscription) Close() error {
+	var err error
+	s.closeOnce.Do(func() {
+		close(s.done)
+		err = s.pubsub.Close()
+	})
+	return err
 }
 
 // PauseQueue pauses task processing on the specified queue.
